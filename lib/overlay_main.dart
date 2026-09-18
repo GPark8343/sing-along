@@ -61,6 +61,7 @@ class _OverlayRootState extends State<OverlayRoot> {
   int? _durationMs;
   bool _fromCache = false;
   bool _loadingLyrics = false;
+  bool _isUserPasted = false;
 
   @override
   void initState() {
@@ -115,6 +116,7 @@ class _OverlayRootState extends State<OverlayRoot> {
       _trackKey = newTrackKey;
       _durationMs = event['durationMs'] as int?;
       _fromCache = event['fromCache'] as bool? ?? false;
+      _isUserPasted = event['isUserPasted'] as bool? ?? false;
       _lines = found
           ? [
               for (final entry in rawLines)
@@ -135,20 +137,10 @@ class _OverlayRootState extends State<OverlayRoot> {
     });
   }
 
-  DateTime? _lastOverlayReceiveAt; // TEMPORARY diagnostic
-
   void _onPosition(Map event) {
     // Ignore position pings meant for whatever song was playing before this
     // one — they'd otherwise briefly show the wrong current line.
     if (event['trackKey'] != _trackKey) return;
-    final now = DateTime.now();
-    if (_lastOverlayReceiveAt != null) {
-      final gapMs = now.difference(_lastOverlayReceiveAt!).inMilliseconds;
-      if (gapMs > 500) {
-        debugPrint('[sing-along] overlay RECEIVE GAP ${gapMs}ms');
-      }
-    }
-    _lastOverlayReceiveAt = now;
     setState(() {
       final rawPositionMs = event['positionMs'] as int?;
       _positionMs = rawPositionMs == null ? null : rawPositionMs + _relayDelayMs(event);
@@ -196,19 +188,8 @@ class _OverlayRootState extends State<OverlayRoot> {
     setState(() => _currentIndex = next);
   }
 
-  // In the first couple of seconds right after the overlay is freshly shown, the message
-  // channel back to the main engine isn't reliably wired up yet (OverlayService is still
-  // finishing its own setup) — a tap right in that window can silently go nowhere. Sending a
-  // couple of follow-up copies covers that gap without the user needing to notice and retap;
-  // _onExpandRequested() on the main-engine side ignores a duplicate if one already landed.
   void _requestExpand() {
     FlutterOverlayWindow.shareData({'type': 'expand'});
-    Future.delayed(const Duration(milliseconds: 500), () {
-      FlutterOverlayWindow.shareData({'type': 'expand'});
-    });
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      FlutterOverlayWindow.shareData({'type': 'expand'});
-    });
   }
 
   // Closing from the overlay's own X button is invisible to the main engine's _overlayActive
@@ -223,7 +204,10 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   @override
   Widget build(BuildContext context) {
-    final currentLine = _lines.isEmpty
+    // User-pasted lyrics are never rendered in this small card — there's no room here to
+    // offer the paste UI itself, so this just points the user at the full-screen page instead
+    // of trying (and failing) to usefully cram hand-entered text into this space.
+    final currentLine = (_lines.isEmpty || _isUserPasted)
         ? null
         : _lines[_currentIndex.clamp(0, _lines.length - 1)];
     final progress =
@@ -343,28 +327,33 @@ class _OverlayRootState extends State<OverlayRoot> {
                         child: LayoutBuilder(
                           builder: (context, constraints) => GestureDetector(
                             behavior: HitTestBehavior.opaque,
-                            // Plain (unsynced) lyrics have no timestamps to auto-advance
-                            // by, so the only way through them is manual — tap the right
-                            // half of the card for the next line, left half for the
-                            // previous one. Synced lyrics already advance on their own,
-                            // so a tap does nothing there rather than fighting the
-                            // position-driven line.
-                            onTapUp: _isSynced || _lines.isEmpty
-                                ? null
-                                : (details) => _advanceLine(
-                                    details.localPosition.dx > constraints.maxWidth / 2
-                                        ? 1
-                                        : -1,
-                                  ),
+                            // Several different meanings depending on state: nothing found,
+                            // or the user's own pasted lyrics (this card has no room to offer
+                            // a paste UI, or to usefully show hand-entered text) — tapping
+                            // opens the full-screen page either way. Plain (unsynced) fetched
+                            // lyrics — tap the right half for the next line, left half for the
+                            // previous one. Synced lyrics — tap does nothing, it already
+                            // advances on its own.
+                            onTapUp: !_loadingLyrics && _trackKey != null && (_lines.isEmpty || _isUserPasted)
+                                ? (_) => _requestExpand()
+                                : (_lines.isNotEmpty && !_isSynced && !_isUserPasted
+                                    ? (details) => _advanceLine(
+                                        details.localPosition.dx > constraints.maxWidth / 2
+                                            ? 1
+                                            : -1,
+                                      )
+                                    : null),
                             child: SingleChildScrollView(
                               child: Center(
                               child: currentLine == null
                                   ? Text(
                                       _loadingLyrics
                                           ? '가사 불러오는 중...'
-                                          : (_trackKey != null
-                                              ? '가사를 찾을 수 없음'
-                                              : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요'),
+                                          : (_isUserPasted
+                                              ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
+                                              : (_trackKey != null
+                                                  ? '가사를 찾을 수 없음 — 눌러서 직접 입력'
+                                                  : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요')),
                                       textAlign: TextAlign.center,
                                       style: const TextStyle(
                                         color: Colors.white70,

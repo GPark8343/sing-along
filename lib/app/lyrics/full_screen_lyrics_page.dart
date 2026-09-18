@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../core/platform/notification_bridge.dart';
 import '../../data/repositories/lyrics_repository.dart';
 import '../../song_detection/now_playing_model.dart';
 import '../../song_detection/now_playing_watcher.dart';
@@ -19,12 +20,20 @@ class FullScreenLyricsPage extends StatefulWidget {
     required this.lyricsRepository,
     required this.initialNowPlaying,
     required this.initialLines,
+    this.initialIsUserPasted = false,
+    this.onLyricsEdited,
   });
 
   final NowPlayingWatcher watcher;
   final LyricsRepository lyricsRepository;
   final NowPlaying? initialNowPlaying;
   final List<LyricsLine> initialLines;
+  final bool initialIsUserPasted;
+  // Called after a paste-in or a refetch-from-API succeeds, so the main engine (and, through
+  // it, the small overlay — this page can't reach the overlay directly, only the main engine's
+  // own shareData channel can) picks up the edit immediately instead of sitting on whatever it
+  // had before until the next natural track change.
+  final Future<void> Function(NowPlaying nowPlaying, LyricsResult result)? onLyricsEdited;
 
   @override
   State<FullScreenLyricsPage> createState() => _FullScreenLyricsPageState();
@@ -32,11 +41,16 @@ class FullScreenLyricsPage extends StatefulWidget {
 
 class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   final ItemScrollController _scrollController = ItemScrollController();
+  final TextEditingController _pasteController = TextEditingController();
   late List<LyricsLine> _lines;
   NowPlaying? _nowPlaying;
   late String? _currentTrackKey;
   int _currentIndex = 0;
   bool _loadingLyrics = false;
+  bool _savingPastedLyrics = false;
+  bool _showPasteForm = false; // opened either automatically (not-found) or manually (wrong lyrics)
+  bool _isUserPasted = false;
+  bool _refetchingFromApi = false;
   StreamSubscription<NowPlaying?>? _positionSub;
   StreamSubscription<NowPlaying?>? _trackChangeSub;
 
@@ -48,6 +62,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     _lines = widget.initialLines;
     _nowPlaying = widget.initialNowPlaying;
     _currentTrackKey = widget.initialNowPlaying?.trackKey;
+    _isUserPasted = widget.initialIsUserPasted;
     _positionSub = widget.watcher.positionStream.listen(_onPosition);
     _trackChangeSub = widget.watcher.trackChanges.listen(_onTrackChanged);
   }
@@ -56,7 +71,62 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   void dispose() {
     _positionSub?.cancel();
     _trackChangeSub?.cancel();
+    _pasteController.dispose();
     super.dispose();
+  }
+
+  // LRCLIB either doesn't have this song or (rarely, despite the matching safeguards) matched
+  // the wrong one — this lets the user paste in lyrics they found themselves as a fallback,
+  // going through the same on-device phonetic/translation pipeline a real fetch would and
+  // landing in the same cache slot, so it displays and persists exactly like a normal result
+  // (just unsynced, since pasted text carries no LRC timing).
+  Future<void> _savePastedLyrics() async {
+    final text = _pasteController.text;
+    final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
+    if (text.trim().isEmpty || nowPlaying == null || _savingPastedLyrics) return;
+    setState(() => _savingPastedLyrics = true);
+    final result = await widget.lyricsRepository.savePastedLyrics(
+      title: nowPlaying.title,
+      artist: nowPlaying.artist ?? '',
+      pastedText: text,
+    );
+    if (!mounted) return;
+    setState(() {
+      _savingPastedLyrics = false;
+      _lines = result.found ? result.lines : const [];
+      _isUserPasted = result.isUserPasted;
+      _currentIndex = 0;
+      if (result.found) {
+        _pasteController.clear();
+        _showPasteForm = false;
+      }
+    });
+    await widget.onLyricsEdited?.call(nowPlaying, result);
+  }
+
+  // A safety net for a paste-in that turns out to have been the wrong call — this discards it
+  // and asks LRCLIB again, exactly as if the song had just started playing fresh.
+  Future<void> _refetchOriginalFromApi() async {
+    final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
+    if (nowPlaying == null || _refetchingFromApi) return;
+    setState(() {
+      _refetchingFromApi = true;
+      _loadingLyrics = true;
+    });
+    final result = await widget.lyricsRepository.refetchFromApi(
+      title: nowPlaying.title,
+      artist: nowPlaying.artist ?? '',
+      durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
+    );
+    if (!mounted) return;
+    setState(() {
+      _refetchingFromApi = false;
+      _loadingLyrics = false;
+      _lines = result.found ? result.lines : const [];
+      _isUserPasted = result.isUserPasted;
+      _currentIndex = 0;
+    });
+    await widget.onLyricsEdited?.call(nowPlaying, result);
   }
 
   Future<void> _onTrackChanged(NowPlaying? nowPlaying) async {
@@ -76,6 +146,8 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
         _nowPlaying = nowPlaying;
         _loadingLyrics = true;
         _lines = const [];
+        _showPasteForm = false; // a paste form left open for the previous song is stale here
+        _pasteController.clear();
       });
     }
     final result = await widget.lyricsRepository.getLyrics(
@@ -83,10 +155,15 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
       artist: nowPlaying.artist ?? '',
       durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
     );
+    // Another track change (a fast skip, or several) may have landed while this fetch was
+    // still running — _currentTrackKey would have moved on by now, so this result is for a
+    // song that isn't playing anymore and shouldn't overwrite what's currently shown.
+    if (_currentTrackKey != nowPlaying.trackKey) return;
     if (!mounted) return;
     setState(() {
       _loadingLyrics = false;
       _lines = result.found ? result.lines : const [];
+      _isUserPasted = result.isUserPasted;
       _currentIndex = 0;
     });
   }
@@ -123,9 +200,21 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
+    return PopScope(
+      // Let the pop happen normally first — main.dart's _onExpandRequested() is awaiting
+      // this route's pop to restore the compact overlay, so blocking it here would leave
+      // that cleanup stuck waiting forever. moveTaskToBack() alongside it is what actually
+      // sends the user back to whatever app (e.g. YouTube Music) was in front before
+      // bringToFront() surfaced this one — a plain pop alone would only reveal this app's
+      // own HomePage underneath, since this route lives in the same Activity/Navigator.
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) return;
+        NotificationBridge.moveTaskToBack();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -134,26 +223,47 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
           style: const TextStyle(color: Colors.white, fontSize: 18),
         ),
         actions: [
-          if (_lines.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: Tooltip(
-                message: _isSynced ? '싱크됨 — 자동으로 넘어감' : '싱크 없음 — 직접 스크롤해서 보세요',
-                child: Icon(
-                  _isSynced ? Icons.sync : Icons.sync_disabled,
-                  color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
-                ),
+          if (_lines.isNotEmpty && !_showPasteForm) ...[
+            Tooltip(
+              message: _isSynced ? '싱크됨 — 자동으로 넘어감' : '싱크 없음 — 직접 스크롤해서 보세요',
+              child: Icon(
+                _isSynced ? Icons.sync : Icons.sync_disabled,
+                color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
               ),
             ),
+            IconButton(
+              tooltip: '가사가 틀렸나요? 직접 입력',
+              icon: const Icon(Icons.edit_note, color: Colors.white70),
+              onPressed: () => setState(() => _showPasteForm = true),
+            ),
+            if (_isUserPasted)
+              IconButton(
+                tooltip: '직접 입력한 가사를 버리고 원본을 다시 불러오기',
+                icon: _refetchingFromApi
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+                      )
+                    : const Icon(Icons.refresh, color: Colors.white70),
+                onPressed: _refetchingFromApi ? null : _refetchOriginalFromApi,
+              ),
+          ],
         ],
       ),
-      body: _lines.isEmpty
-          ? Center(
-              child: Text(
-                _loadingLyrics ? '가사 불러오는 중...' : '가사를 찾을 수 없음',
-                style: const TextStyle(color: Colors.white54),
-              ),
+      body: _loadingLyrics
+          ? const Center(
+              child: Text('가사 불러오는 중...', style: TextStyle(color: Colors.white54)),
             )
+          : (_lines.isEmpty || _showPasteForm)
+              ? _PasteLyricsForm(
+                  controller: _pasteController,
+                  saving: _savingPastedLyrics,
+                  onSave: _savePastedLyrics,
+                  // Only offer a way out without saving when there's something to go back
+                  // to — the auto-opened not-found form has nothing behind it to cancel to.
+                  onCancel: _lines.isNotEmpty ? () => setState(() => _showPasteForm = false) : null,
+                )
           : ScrollablePositionedList.builder(
               itemScrollController: _scrollController,
               itemCount: _lines.length,
@@ -163,6 +273,75 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
                 isCurrent: index == _currentIndex,
               ),
             ),
+      ),
+    );
+  }
+}
+
+class _PasteLyricsForm extends StatelessWidget {
+  const _PasteLyricsForm({
+    required this.controller,
+    required this.saving,
+    required this.onSave,
+    this.onCancel,
+  });
+
+  final TextEditingController controller;
+  final bool saving;
+  final VoidCallback onSave;
+  // Present only when there's an existing (if wrong) result behind this form to go back to
+  // without saving — null for the auto-opened not-found case, where there's nothing to cancel to.
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            onCancel != null ? '가사가 잘못됐나요?' : '가사를 찾을 수 없음',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white54, fontSize: 16),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '웹에서 찾은 가사를 붙여넣으면 이 곡에 저장돼요 (줄바꿈 기준으로 한 줄씩) — 싱크 정보 없이 원문으로만 저장됩니다',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white38, fontSize: 13),
+          ),
+          const SizedBox(height: 20),
+          TextField(
+            controller: controller,
+            maxLines: 10,
+            minLines: 6,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: '가사를 여기에 붙여넣으세요',
+              hintStyle: const TextStyle(color: Colors.white24),
+              filled: true,
+              fillColor: Colors.white10,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton(
+            onPressed: saving ? null : onSave,
+            child: Text(saving ? '저장 중...' : '저장'),
+          ),
+          if (onCancel != null) ...[
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: saving ? null : onCancel,
+              child: const Text('취소', style: TextStyle(color: Colors.white54)),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

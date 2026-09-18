@@ -1,5 +1,6 @@
 package com.singalong.sing_along.bridge;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.provider.Settings;
@@ -26,9 +27,11 @@ public class NotificationChannelHandler implements MethodChannel.MethodCallHandl
     public static final String CHANNEL_NAME = "sing_along/notification";
 
     private final Context appContext;
+    private final Activity activity;
 
-    public NotificationChannelHandler(Context context) {
-        this.appContext = context.getApplicationContext();
+    public NotificationChannelHandler(Activity activity) {
+        this.activity = activity;
+        this.appContext = activity.getApplicationContext();
     }
 
     @Override
@@ -48,6 +51,14 @@ public class NotificationChannelHandler implements MethodChannel.MethodCallHandl
             case "bringToFront":
                 bringMainActivityToFront();
                 result.success(null);
+                break;
+            case "moveTaskToBack":
+                // Used by the full-screen lyrics page's back button: a plain Navigator.pop()
+                // would just drop back to HomePage within this same Activity, not to whatever
+                // app (YouTube Music, say) the user was actually looking at before the overlay's
+                // expand button brought this Activity to the front. moveTaskToBack() instead
+                // backgrounds the whole task, which is what lets Android reveal that app again.
+                result.success(activity.moveTaskToBack(true));
                 break;
             default:
                 result.notImplemented();

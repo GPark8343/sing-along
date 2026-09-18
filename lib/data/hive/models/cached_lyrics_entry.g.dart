@@ -20,19 +20,22 @@ class CachedLyricsEntryAdapter extends TypeAdapter<CachedLyricsEntry> {
       found: fields[0] as bool,
       lines: (fields[1] as List).cast<CachedLyricLine>(),
       cachedAt: fields[2] as DateTime,
+      isUserPasted: fields[3] == null ? false : fields[3] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, CachedLyricsEntry obj) {
     writer
-      ..writeByte(3)
+      ..writeByte(4)
       ..writeByte(0)
       ..write(obj.found)
       ..writeByte(1)
       ..write(obj.lines)
       ..writeByte(2)
-      ..write(obj.cachedAt);
+      ..write(obj.cachedAt)
+      ..writeByte(3)
+      ..write(obj.isUserPasted);
   }
 
   @override

@@ -65,9 +65,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _lyricsStatus = '';
   Map<String, dynamic>? _lastLyricsPayload;
   List<LyricsLine> _currentLyrics = const [];
+  bool _currentLyricsIsUserPasted = false;
   bool _expandRequestInFlight = false;
   bool _toggleInFlight = false;
   Timer? _stopDebounceTimer;
+  // trackKey of the most recently requested lyrics fetch — lets a fetch that's still running
+  // when a newer track change starts recognize it's now stale once it finally completes.
+  String? _latestRequestedTrackKey;
   bool _overlayPositionSendInFlight = false;
 
   @override
@@ -115,8 +119,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // syncing fine while the overlay didn't. Skipping a tick whenever a send is already in
   // flight naturally paces this to whatever the channel can actually keep up with, instead
   // of a fixed interval that might still be too fast on a slower device.
-  DateTime? _lastOverlaySendAt; // TEMPORARY diagnostic
-
   Future<void> _sendPositionToOverlay(NowPlaying? event) async {
     if (_overlayPositionSendInFlight) return;
     _overlayPositionSendInFlight = true;
@@ -133,14 +135,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // already-stale position as if it were current.
         'capturedAtMs': DateTime.now().millisecondsSinceEpoch,
       });
-      final now = DateTime.now();
-      if (_lastOverlaySendAt != null) {
-        final gapMs = now.difference(_lastOverlaySendAt!).inMilliseconds;
-        if (gapMs > 500) {
-          debugPrint('[sing-along] overlay send GAP ${gapMs}ms');
-        }
-      }
-      _lastOverlaySendAt = now;
     } finally {
       _overlayPositionSendInFlight = false;
     }
@@ -167,6 +161,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             lyricsRepository: _lyricsRepository,
             initialNowPlaying: _nowPlaying,
             initialLines: _currentLyrics,
+            initialIsUserPasted: _currentLyricsIsUserPasted,
+            onLyricsEdited: _applyLyricsResult,
           ),
         ));
       }
@@ -189,10 +185,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // does, this timer gets cancelled below and nothing was ever sent.
       _stopDebounceTimer?.cancel();
       _stopDebounceTimer = Timer(const Duration(milliseconds: 400), () {
+        // A fetch for whatever was playing before this could still be in flight — make sure
+        // its result gets dropped instead of landing after this "stopped" state and looking
+        // like it's still playing.
+        _latestRequestedTrackKey = null;
         if (!mounted) return;
         setState(() {
           _lyricsStatus = '';
           _currentLyrics = const [];
+          _currentLyricsIsUserPasted = false;
         });
         _lastLyricsPayload = {'type': 'lyrics', 'found': false, 'title': '', 'artist': ''};
         FlutterOverlayWindow.shareData(_lastLyricsPayload);
@@ -201,6 +202,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     _stopDebounceTimer?.cancel();
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
+    // Marks this as the current track for as long as its fetch is running — if the song
+    // changes again before it finishes (a fast skip, or several in a row), whichever fetch
+    // completes will check this before doing anything, so a slower/earlier one that resolves
+    // after a newer one has already landed can recognize it's stale instead of overwriting
+    // the now-current song's lyrics with the one that used to be playing.
+    final requestedTrackKey = nowPlaying.trackKey;
+    _latestRequestedTrackKey = requestedTrackKey;
     // Sent immediately, before the (possibly several-second, for an uncached song) fetch
     // below even starts — otherwise the overlay/full-screen page just keep showing the
     // previous song's lines with nothing telling the user that's stale, right through the
@@ -217,16 +225,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       artist: nowPlaying.artist ?? '',
       durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
     );
+    if (_latestRequestedTrackKey != requestedTrackKey) return; // superseded — drop this result
+    if (mounted) setState(() => _lyricsStatus = _statusFor(result));
+    await _applyLyricsResult(nowPlaying, result);
+  }
+
+  // Pushes a lyrics result out to both this screen's own state and the overlay — shared by a
+  // normal track-change fetch and by the full-screen page editing the current song's lyrics
+  // by hand (a paste-in, or discarding one back to the API result), so the small overlay
+  // reflects that edit immediately instead of sitting on whatever it had before.
+  Future<void> _applyLyricsResult(NowPlaying nowPlaying, LyricsResult result) async {
     if (mounted) {
       setState(() {
-        _lyricsStatus = _statusFor(result);
         _currentLyrics = result.found ? result.lines : const [];
+        _currentLyricsIsUserPasted = result.isUserPasted;
       });
     }
     _lastLyricsPayload = {
       'type': 'lyrics',
       'found': result.found,
       'fromCache': result.fromCache,
+      'isUserPasted': result.isUserPasted,
       'trackKey': nowPlaying.trackKey,
       'title': nowPlaying.title,
       'artist': nowPlaying.artist ?? '',

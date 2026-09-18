@@ -64,9 +64,11 @@ class LrclibClient {
     // settling for plain.
     if (exact != null && exact.hasSyncedLyrics) return exact;
 
-    final candidates = _titleCandidates(trackName);
-    final searched = await _searchBestAcross(candidates, artistName, durationSeconds) ??
-        (artistName.isNotEmpty ? await _searchBestAcross(candidates, '', durationSeconds) : null);
+    final candidates = _titleCandidates(trackName, artistName);
+    final searched = await _searchBestAcross(candidates, artistName, artistName, durationSeconds) ??
+        (artistName.isNotEmpty
+            ? await _searchBestAcross(candidates, '', artistName, durationSeconds)
+            : null);
 
     if (searched != null && searched.hasSyncedLyrics) return searched;
     // Neither source had a synced version — fall back to whichever had lyrics at all,
@@ -74,28 +76,44 @@ class LrclibClient {
     return exact ?? searched;
   }
 
-  List<String> _titleCandidates(String trackName) {
+  // A YouTube-style "Artist - Title" notification title, once normalized, still splits into
+  // ["Artist", "Title"] here — searching LRCLIB with the artist fragment AS a title candidate
+  // is worse than just skipping it: LRCLIB submissions often carry that same "Artist - Title"
+  // convention in their own trackName field, so an "artist name" candidate can score a
+  // deceptively high partial match against a *completely different song* by that artist
+  // (the shared "Artist - " prefix, plus the artist-name score already maxed out from a
+  // perfect artist match) — exactly the "matched the wrong song" failure mode this is guarding
+  // against, not a genuine alternate phrasing of the real title.
+  List<String> _titleCandidates(String trackName, String artistName) {
     final candidates = <String>[trackName];
     for (final part in trackName.split(_titleSplitPattern)) {
       final trimmed = part.trim();
-      if (trimmed.isNotEmpty && !candidates.contains(trimmed)) {
-        candidates.add(trimmed);
-      }
+      if (trimmed.isEmpty || candidates.contains(trimmed)) continue;
+      if (artistName.isNotEmpty && _similarity(trimmed, artistName) > 0.8) continue;
+      candidates.add(trimmed);
     }
     return candidates;
   }
 
+  // queryArtist and scoringArtist are deliberately separate: queryArtist narrows the actual
+  // LRCLIB /search request (empty widens it, for when the real artist string doesn't resemble
+  // LRCLIB's own record closely enough for its search to find anything). scoringArtist is
+  // always the real artist we're actually looking for, regardless of what the query used —
+  // scoring against an empty artist made every result's artist score an automatic 1.0, which
+  // meant an artist-less search for a common title (e.g. "Caravan", a jazz standard with
+  // dozens of unrelated submissions) would score any of them as a "perfect" match.
   Future<LrclibLyrics?> _searchBestAcross(
     List<String> titleCandidates,
-    String artistName,
+    String queryArtist,
+    String scoringArtist,
     int? durationSeconds,
   ) async {
     Map<String, dynamic>? best;
     var bestScore = 0.0;
     for (final candidate in titleCandidates) {
-      final result = await _search(candidate, artistName);
+      final result = await _search(candidate, queryArtist);
       for (final entry in result) {
-        final score = _matchScore(candidate, artistName, durationSeconds, entry);
+        final score = _matchScore(candidate, scoringArtist, durationSeconds, entry);
         if (score > bestScore) {
           bestScore = score;
           best = entry;
@@ -142,8 +160,18 @@ class LrclibClient {
     var score = titleScore * 0.65 + artistScore * 0.35;
     if (durationSeconds != null) {
       final resultDuration = (result['duration'] as num?)?.toInt();
-      if (resultDuration != null && (resultDuration - durationSeconds).abs() <= 3) {
-        score += 0.05; // tie-break nudge for a close duration match
+      if (resultDuration != null) {
+        // LRCLIB routinely has several submissions of the exact same song (different
+        // contributors, or genuinely different cuts — a radio edit vs. the full version, a
+        // studio track vs. a live recording someone mislabeled) that title/artist similarity
+        // alone can't tell apart, since they're all identical on that front. Duration is the
+        // one signal left to prefer the submission that's actually the same recording as
+        // what's playing: a smooth bonus that peaks at an exact match and fades out by 15s
+        // off, rather than a flat all-or-nothing threshold, so it keeps discriminating even
+        // between two candidates that are both "close".
+        final diffSeconds = (resultDuration - durationSeconds).abs();
+        final durationBonus = (1 - (diffSeconds / 15)).clamp(0.0, 1.0) * 0.08;
+        score += durationBonus;
       }
     }
     // A small nudge, not a rescue — this only ever breaks a near-tie between two otherwise

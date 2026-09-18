@@ -17,10 +17,15 @@ class CachedLyricsEntry {
   final List<CachedLyricLine> lines;
   @HiveField(2)
   final DateTime cachedAt;
+  // defaultValue covers entries cached before this field existed — they're all real fetches,
+  // never user-pasted.
+  @HiveField(3, defaultValue: false)
+  final bool isUserPasted;
 
   const CachedLyricsEntry({
     required this.found,
     required this.lines,
     required this.cachedAt,
+    this.isUserPasted = false,
   });
 }

@@ -34,4 +34,12 @@ class NotificationBridge {
   static Future<void> bringToFront() async {
     await _channel.invokeMethod('bringToFront');
   }
+
+  /// Backgrounds this whole app (moveTaskToBack), rather than just popping a Flutter route —
+  /// used by the full-screen lyrics page's back button so it returns to whatever app (e.g.
+  /// YouTube Music) was in front before bringToFront() surfaced this one, instead of landing
+  /// on this app's own HomePage.
+  static Future<void> moveTaskToBack() async {
+    await _channel.invokeMethod('moveTaskToBack');
+  }
 }
