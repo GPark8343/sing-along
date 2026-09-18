@@ -2,6 +2,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../../core/text/japanese_detector.dart';
 import '../../core/text/lrc_parser.dart';
+import '../../core/text/spanish_detector.dart';
+import '../../core/text/spanish_hangul.dart';
 import '../../core/text/title_normalizer.dart';
 import '../api/deepl_client.dart';
 import '../api/lrclib_client.dart';
@@ -153,9 +155,17 @@ class LyricsRepository {
   // handed, whether they came with LRC timestamps or not.
   Future<LyricsResult> _buildResult(List<String> originalTexts, List<int?> timestamps) async {
     final isJapanese = originalTexts.any(JapaneseDetector.isJapanese);
+    // Spanish is checked against the whole song rather than per-line (like
+    // Japanese's kana check) because a single short lyric line rarely has
+    // enough stopword density on its own to tell it apart from English.
+    final isSpanish = !isJapanese && SpanishDetector.isSpanishLyrics(originalTexts);
 
     final results = await Future.wait([
-      isJapanese ? _phoneticClient.readingsForLines(originalTexts) : Future.value(null),
+      isJapanese
+          ? _phoneticClient.readingsForLines(originalTexts)
+          : isSpanish
+              ? Future.value(SpanishHangul.transliterateLines(originalTexts))
+              : Future.value(null),
       _deepLClient.translateLines(originalTexts),
     ]);
     final readings = results[0];
