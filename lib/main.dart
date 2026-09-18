@@ -481,8 +481,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // Pin the start position explicitly rather than relying on the
         // plugin's default (-statusBarHeight), which assumes top-anchored
         // gravity and pushes a bottom-anchored overlay off-screen — see the
-        // note above for bottomCenter's failure mode.
-        startPosition: const OverlayPosition(0, 0),
+        // note above for bottomCenter's failure mode. Offsetting y keeps the
+        // native window's touchable rectangle entirely below the status
+        // bar — sitting *behind* it (even if visually transparent there)
+        // let the system status-bar gesture area intercept touches meant
+        // for this card instead, including swallowing pinch/multi-touch
+        // gestures near the top row's buttons. MediaQuery.padding.top read
+        // from this context measured noticeably smaller than the real
+        // status bar on-device — confirmed via dumpsys that this status
+        // bar is 111px/~37dp tall, not the ~25dp the plugin's own
+        // DEFAULT_STATUS_BAR_HEIGHT_DP fallback assumes either — so this
+        // uses a fixed 40dp instead, clearing it with a small margin to
+        // spare for devices with an even taller one (punch-hole cameras).
+        startPosition: const OverlayPosition(0, 40),
         enableDrag: true,
         overlayTitle: 'sing-along',
         overlayContent: '가사 오버레이가 실행 중입니다',

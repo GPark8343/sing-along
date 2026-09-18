@@ -71,6 +71,8 @@ class _OverlayRootState extends State<OverlayRoot> {
   List<_LyricLine> _lines = const [];
   int _currentIndex = 0;
   String? _trackKey;
+  String? _title;
+  String? _artist;
   int? _positionMs;
   int? _durationMs;
   bool _fromCache = false;
@@ -114,6 +116,8 @@ class _OverlayRootState extends State<OverlayRoot> {
       setState(() {
         _loadingLyrics = true;
         _trackKey = newTrackKey;
+        _title = event['title'] as String?;
+        _artist = event['artist'] as String?;
         _lines = const [];
         _positionMs = null;
         _currentIndex = 0;
@@ -132,6 +136,8 @@ class _OverlayRootState extends State<OverlayRoot> {
     setState(() {
       _loadingLyrics = false;
       _trackKey = newTrackKey;
+      _title = event['title'] as String?;
+      _artist = event['artist'] as String?;
       _durationMs = event['durationMs'] as int?;
       _fromCache = event['fromCache'] as bool? ?? false;
       _isUserPasted = event['isUserPasted'] as bool? ?? false;
@@ -266,11 +272,6 @@ class _OverlayRootState extends State<OverlayRoot> {
                           child: Row(
                             children: [
                               const SizedBox(width: 12),
-                              const Icon(
-                                Icons.drag_handle,
-                                color: Colors.white38,
-                                size: 18,
-                              ),
                               if (_fromCache && _lines.isNotEmpty) ...[
                                 const SizedBox(width: 8),
                                 const Icon(
@@ -282,7 +283,7 @@ class _OverlayRootState extends State<OverlayRoot> {
                                 const Text(
                                   '저장됨',
                                   style: TextStyle(
-                                    color: Colors.white38,
+                                    color: Colors.amberAccent,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -389,23 +390,52 @@ class _OverlayRootState extends State<OverlayRoot> {
                                   child: FittedBox(
                                     fit: BoxFit.scaleDown,
                                     child: currentLine == null
-                                        ? Text(
-                                            _loadingLyrics
-                                                ? '가사 불러오는 중...'
-                                                : (_isUserPasted
-                                                      ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
-                                                      : (_lines.isNotEmpty
-                                                            ? '싱크 없는 가사 — 눌러서 전체화면으로 보기'
-                                                            : (_trackKey != null
-                                                                  ? '가사를 찾을 수 없음 — 눌러서 직접 입력'
-                                                                  : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요'))),
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                              fontSize:
-                                                  cardHeight *
-                                                  _placeholderFontRatio,
-                                            ),
+                                        ? Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              if (_title != null &&
+                                                  _title!.isNotEmpty) ...[
+                                                Text(
+                                                  (_artist == null ||
+                                                          _artist!.isEmpty)
+                                                      ? _title!
+                                                      : '${_title!} - ${_artist!}',
+                                                  textAlign: TextAlign.center,
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                    fontWeight:
+                                                        FontWeight.w600,
+                                                    fontSize:
+                                                        cardHeight *
+                                                        _placeholderFontRatio *
+                                                        1.15,
+                                                  ),
+                                                ),
+                                                SizedBox(
+                                                  height: cardHeight * 0.025,
+                                                ),
+                                              ],
+                                              Text(
+                                                _loadingLyrics
+                                                    ? '가사 불러오는 중...'
+                                                    : (_isUserPasted
+                                                          ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
+                                                          : (_lines
+                                                                    .isNotEmpty
+                                                                ? '싱크 없는 가사 — 눌러서 전체화면으로 보기'
+                                                                : (_trackKey !=
+                                                                          null
+                                                                      ? '가사를 찾을 수 없음 — 눌러서 직접 입력'
+                                                                      : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요'))),
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize:
+                                                      cardHeight *
+                                                      _placeholderFontRatio,
+                                                ),
+                                              ),
+                                            ],
                                           )
                                         : Column(
                                             mainAxisSize: MainAxisSize.min,
