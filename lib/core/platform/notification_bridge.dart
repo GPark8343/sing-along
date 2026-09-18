@@ -27,4 +27,11 @@ class NotificationBridge {
     if (result == null) return null;
     return NowPlaying.fromMap(result);
   }
+
+  /// Resurfaces MainActivity (it keeps running in the background even while some other
+  /// app is in the foreground) — used when the floating overlay's "expand" button asks
+  /// for the full-screen lyrics view, which only the main engine's widget tree can show.
+  static Future<void> bringToFront() async {
+    await _channel.invokeMethod('bringToFront');
+  }
 }

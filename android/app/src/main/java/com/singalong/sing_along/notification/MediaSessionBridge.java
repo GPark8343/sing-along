@@ -21,8 +21,14 @@ public final class MediaSessionBridge {
      * cheap — {@link android.media.session.MediaController#getPlaybackState()} reads a value
      * already cached locally from the session's last callback, not a fresh cross-process call —
      * so this can run fairly often without meaningfully costing battery/CPU.
+     *
+     * Each tick already reports an accurate "right now" position (see
+     * MediaNotificationListenerService#extrapolatedPosition), so the interval isn't about
+     * correcting drift — it's the display's effective refresh rate. 16ms matches a 60fps
+     * frame — polling faster than the screen can actually redraw wastes battery/CPU for zero
+     * visible benefit, so this is the practical floor, not an arbitrary tuning value.
      */
-    private static final long POLL_INTERVAL_MS = 500;
+    private static final long POLL_INTERVAL_MS = 16;
 
     public interface Listener {
         void onNowPlayingChanged(NowPlayingInfo info);

@@ -143,7 +143,13 @@ public class OverlayService extends Service implements View.OnTouchListener {
             }
         });
         overlayMessageChannel.setMessageHandler((message, reply) -> {
-            WindowSetup.messenger.send(message);
+            // Null before the main engine's Activity has attached (see
+            // FlutterOverlayWindowPlugin.onAttachedToActivity) — dropping the message here
+            // rather than NPEing keeps a mistimed shareData() from the overlay harmless
+            // instead of crashing this handler.
+            if (WindowSetup.messenger != null) {
+                WindowSetup.messenger.send(message);
+            }
         });
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 

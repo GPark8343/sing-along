@@ -2,9 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 
+import 'app/lyrics/full_screen_lyrics_page.dart';
 import 'app/onboarding/permission_screen.dart';
 import 'core/platform/notification_bridge.dart';
+import 'data/hive/hive_bootstrap.dart';
+import 'data/hive/models/cached_lyrics_entry.dart';
 import 'data/repositories/lyrics_repository.dart';
 import 'song_detection/now_playing_model.dart';
 import 'song_detection/now_playing_watcher.dart';
@@ -17,25 +21,32 @@ import 'song_detection/now_playing_watcher.dart';
 // function") even though the function itself compiles fine.
 part 'overlay_main.dart';
 
-void main() {
-  runApp(const SingAlongApp());
+void main() async {
+  // Only the main engine ever touches Hive — see hive_bootstrap.dart.
+  WidgetsFlutterBinding.ensureInitialized();
+  final lyricsBox = await initHive();
+  runApp(SingAlongApp(lyricsBox: lyricsBox));
 }
 
 class SingAlongApp extends StatelessWidget {
-  const SingAlongApp({super.key});
+  const SingAlongApp({super.key, required this.lyricsBox});
+
+  final Box<CachedLyricsEntry> lyricsBox;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'sing-along',
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple)),
-      home: const HomePage(),
+      home: HomePage(lyricsBox: lyricsBox),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, required this.lyricsBox});
+
+  final Box<CachedLyricsEntry> lyricsBox;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -47,17 +58,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _overlayActive = false;
   NowPlaying? _nowPlaying;
   late final NowPlayingWatcher _watcher;
-  final LyricsRepository _lyricsRepository = LyricsRepository();
+  late final LyricsRepository _lyricsRepository = LyricsRepository(cacheBox: widget.lyricsBox);
   StreamSubscription<NowPlaying?>? _positionSubscription;
   StreamSubscription<NowPlaying?>? _trackChangeSubscription;
+  StreamSubscription<dynamic>? _overlayMessageSubscription;
   String _lyricsStatus = '';
   Map<String, dynamic>? _lastLyricsPayload;
+  List<LyricsLine> _currentLyrics = const [];
+  bool _expandRequestInFlight = false;
+  bool _toggleInFlight = false;
+  Timer? _stopDebounceTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _watcher = NowPlayingWatcher();
+    _overlayMessageSubscription = FlutterOverlayWindow.overlayListener.listen((event) {
+      if (event is! Map) return;
+      switch (event['type']) {
+        case 'expand':
+          _onExpandRequested();
+        case 'closed':
+          // The overlay's own X button closed it — reflect that immediately rather than
+          // waiting for the next _refreshStatus() call (app resume, etc.), otherwise this
+          // screen's toggle button keeps reading "오버레이 닫기" for an overlay that's
+          // already gone.
+          if (mounted) setState(() => _overlayActive = false);
+      }
+    });
     _positionSubscription = _watcher.positionStream.listen((event) {
       if (!mounted) return;
       setState(() => _nowPlaying = event);
@@ -67,6 +96,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'trackKey': event?.trackKey,
           'positionMs': event?.positionMs,
           'durationMs': event?.durationMs,
+          // Captured right as this engine received the native tick — the
+          // overlay adds however long it took THIS ping to actually reach it
+          // (the shareData hop between the two engines, which isn't free)
+          // back onto positionMs, instead of quietly rendering an
+          // already-stale position as if it were current.
+          'capturedAtMs': DateTime.now().millisecondsSinceEpoch,
         });
       }
     });
@@ -79,27 +114,81 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _positionSubscription?.cancel();
     _trackChangeSubscription?.cancel();
+    _overlayMessageSubscription?.cancel();
+    _stopDebounceTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _onExpandRequested() async {
+    // The overlay resends this same request a couple of times to cover a startup-timing gap
+    // in the message channel (see _requestExpand in overlay_main.dart) — without this guard,
+    // a second copy landing after the first is already mid-flight would push the full-screen
+    // route twice.
+    if (_expandRequestInFlight) return;
+    _expandRequestInFlight = true;
+    try {
+      // Hide the small card while the full-screen page is up, not just because it'd float on
+      // top of our own full-screen content, but because the overlay's TYPE_APPLICATION_OVERLAY
+      // window sits above regular app windows regardless of which app is in front.
+      await FlutterOverlayWindow.closeOverlay();
+      if (mounted) setState(() => _overlayActive = false);
+      await NotificationBridge.bringToFront();
+      if (mounted) {
+        await Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => FullScreenLyricsPage(
+            watcher: _watcher,
+            lyricsRepository: _lyricsRepository,
+            initialNowPlaying: _nowPlaying,
+            initialLines: _currentLyrics,
+          ),
+        ));
+      }
+    } finally {
+      // Guaranteed to clear even if bringToFront/closeOverlay/the route throws — otherwise a
+      // single failed attempt would permanently block every future tap behind the in-flight
+      // guard above, with no way to recover short of restarting the app.
+      _expandRequestInFlight = false;
+    }
+    // Back from full-screen — restore the compact overlay the same way the toggle button does.
+    if (mounted && !_overlayActive) await _toggleOverlay();
   }
 
   Future<void> _onTrackChanged(NowPlaying? nowPlaying) async {
     if (nowPlaying == null) {
-      if (mounted) setState(() => _lyricsStatus = '');
-      // Let the overlay clear itself instead of showing a stale song's lyrics.
-      _lastLyricsPayload = {'type': 'lyrics', 'found': false, 'title': '', 'artist': ''};
-      await FlutterOverlayWindow.shareData(_lastLyricsPayload);
+      // A brief "nothing playing" blip — some apps momentarily clear their MediaSession
+      // metadata while the user is seeking, which reads identically to "playback stopped" —
+      // shouldn't be treated the same as it actually stopping. Wait a beat for a real track
+      // to reappear before wiping lyrics/position state out from under the overlay; if it
+      // does, this timer gets cancelled below and nothing was ever sent.
+      _stopDebounceTimer?.cancel();
+      _stopDebounceTimer = Timer(const Duration(milliseconds: 400), () {
+        if (!mounted) return;
+        setState(() {
+          _lyricsStatus = '';
+          _currentLyrics = const [];
+        });
+        _lastLyricsPayload = {'type': 'lyrics', 'found': false, 'title': '', 'artist': ''};
+        FlutterOverlayWindow.shareData(_lastLyricsPayload);
+      });
       return;
     }
+    _stopDebounceTimer?.cancel();
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
     final result = await _lyricsRepository.getLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
       durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
     );
-    if (mounted) setState(() => _lyricsStatus = _statusFor(result));
+    if (mounted) {
+      setState(() {
+        _lyricsStatus = _statusFor(result);
+        _currentLyrics = result.found ? result.lines : const [];
+      });
+    }
     _lastLyricsPayload = {
       'type': 'lyrics',
       'found': result.found,
+      'fromCache': result.fromCache,
       'trackKey': nowPlaying.trackKey,
       'title': nowPlaying.title,
       'artist': nowPlaying.artist ?? '',
@@ -116,11 +205,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   String _statusFor(LyricsResult result) {
-    if (!result.found) return '가사를 찾을 수 없음';
+    final cacheSuffix = result.fromCache ? ' (캐시)' : '';
+    if (!result.found) return '가사를 찾을 수 없음$cacheSuffix';
     final hasPhonetic = result.lines.any((line) => line.phonetic != null);
     final hasTranslation = result.lines.any((line) => line.translation != null);
     final tiers = [if (hasPhonetic) '독음', if (hasTranslation) '번역'];
-    return tiers.isEmpty ? '가사 로드됨 (원문만)' : '가사 로드됨 · ${tiers.join(' · ')}';
+    final tierLabel = tiers.isEmpty ? '원문만' : tiers.join(' · ');
+    return '가사 로드됨 · $tierLabel$cacheSuffix';
   }
 
   @override
@@ -149,22 +240,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleOverlay() async {
+    // A fast double-tap (or a tap landing while _onExpandRequested's own reopen is still
+    // running) would otherwise start a second show/close sequence before the first one's
+    // native calls and delays have settled, racing them against each other and leaving
+    // _overlayActive out of sync with what's actually on screen.
+    if (_toggleInFlight) return;
+    setState(() => _toggleInFlight = true);
+    try {
+      await _runToggleOverlay();
+    } finally {
+      if (mounted) setState(() => _toggleInFlight = false);
+    }
+  }
+
+  Future<void> _runToggleOverlay() async {
     if (_overlayActive) {
       await FlutterOverlayWindow.closeOverlay();
     } else {
       // showOverlay()'s `height` is consumed as raw physical pixels (unlike
       // the plugin's resizeOverlay(), which runs it through a dp->px
       // conversion), so it has to be scaled by the device's actual pixel
-      // ratio to land on a sane logical size. This is a fixed window sized
-      // for the worst case (OverlayRoot's _maxCardHeight + top-inset/padding
-      // margin) — the plugin's resizeOverlay() throws MissingPluginException
-      // when called from the overlay isolate, so there's no reliable way to
-      // shrink the real window per line; instead the *visible* card inside
-      // it sizes itself to content and sits within this fixed budget (see
-      // overlay_main.dart). Read the ratio before any `await` so it isn't a
-      // stale BuildContext read.
+      // ratio to land on a sane logical size. This must stay in sync with
+      // OverlayRoot's _maxCardHeight (230dp, sized for a 2-line lyric —
+      // see its doc comment) plus ~60dp for SafeArea's status-bar inset.
+      // Read the ratio before any `await` so it isn't a stale BuildContext
+      // read.
       final devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
-      final overlayHeightPx = (440 * devicePixelRatio).round();
+      final overlayHeightPx = (290 * devicePixelRatio).round();
       // OverlayService self-destructs shortly after creating its window if
       // showOverlay() is called while an instance is already alive natively
       // (e.g. one that survived a force-stop on some OEM skins) — always
@@ -198,6 +300,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             'trackKey': current.trackKey,
             'positionMs': current.positionMs,
             'durationMs': current.durationMs,
+            'capturedAtMs': DateTime.now().millisecondsSinceEpoch,
           });
         }
       }
@@ -253,7 +356,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const SizedBox(height: 24),
               if (_permissionStatus.overlayGranted)
                 ElevatedButton(
-                  onPressed: _toggleOverlay,
+                  onPressed: _toggleInFlight ? null : _toggleOverlay,
                   child: Text(_overlayActive ? '오버레이 닫기' : '오버레이 표시'),
                 ),
             ],

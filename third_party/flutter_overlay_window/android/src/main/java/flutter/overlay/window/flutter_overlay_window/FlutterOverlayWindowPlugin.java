@@ -43,6 +43,15 @@ public class FlutterOverlayWindowPlugin implements
     private Activity mActivity;
     private BasicMessageChannel<Object> messenger;
     private Result pendingResult;
+    // True only for the plugin instance attached to the app's actual Activity engine — plugin
+    // auto-registration also runs this class's onAttachedToEngine() on the overlay's own
+    // separate FlutterEngineGroup engine (created in OverlayService), which would otherwise
+    // overwrite the *static* WindowSetup.messenger to point at the overlay's own channel
+    // instead of the main engine's, silently misrouting every overlay -> main shareData message
+    // back to the overlay itself. onAttachedToActivity() only ever fires for an Activity-hosted
+    // engine, never the overlay's headless one, so it's the one reliable signal for "this is the
+    // real main engine."
+    private boolean isMainEngineInstance = false;
     final int REQUEST_CODE_FOR_OVERLAY_PERMISSION = 1248;
 
     @Override
@@ -54,9 +63,6 @@ public class FlutterOverlayWindowPlugin implements
         messenger = new BasicMessageChannel(flutterPluginBinding.getBinaryMessenger(), OverlayConstants.MESSENGER_TAG,
                 JSONMessageCodec.INSTANCE);
         messenger.setMessageHandler(this);
-
-        WindowSetup.messenger = messenger;
-        WindowSetup.messenger.setMessageHandler(this);
     }
 
     @RequiresApi(api = Build.VERSION_CODES.N)
@@ -122,11 +128,17 @@ public class FlutterOverlayWindowPlugin implements
         } else if (call.method.equals("getOverlayPosition")) {
             result.success(OverlayService.getCurrentPosition());
         } else if (call.method.equals("closeOverlay")) {
+            // result.success() must run on every path — when it was only called inside the
+            // isRunning branch, calling closeOverlay() while nothing was actually running (a
+            // real scenario: OverlayService can self-destruct or already be gone by the time
+            // this runs) left the Dart-side `await closeOverlay()` with no reply, hanging
+            // forever — which then wedged every future toggle behind that same still-pending
+            // Future, since the caller never got to its next line.
             if (OverlayService.isRunning) {
                 final Intent i = new Intent(context, OverlayService.class);
                 context.stopService(i);
-                result.success(true);
             }
+            result.success(true);
             return;
         } else {
             result.notImplemented();
@@ -137,7 +149,12 @@ public class FlutterOverlayWindowPlugin implements
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
         channel.setMethodCallHandler(null);
-        WindowSetup.messenger.setMessageHandler(null);
+        // Only clear the shared static handler if this instance is the one that owns it —
+        // otherwise the overlay engine detaching (e.g. the overlay closing) would null out the
+        // main engine's still-live handler too, since WindowSetup.messenger is static/shared.
+        if (isMainEngineInstance) {
+            WindowSetup.messenger.setMessageHandler(null);
+        }
     }
 
     @Override
@@ -150,6 +167,13 @@ public class FlutterOverlayWindowPlugin implements
         // .onCreate() already has an equivalent lazy fallback that creates this engine on
         // first showOverlay() — well after app startup has settled — so we rely on that
         // path exclusively instead of pre-warming here.
+
+        // This callback only ever fires for an engine actually hosting an Activity — the
+        // overlay's own headless engine never gets it — so this is the correct, and only
+        // correct, place to point the shared static messenger at *this* engine.
+        isMainEngineInstance = true;
+        WindowSetup.messenger = messenger;
+        WindowSetup.messenger.setMessageHandler(this);
     }
 
     @Override

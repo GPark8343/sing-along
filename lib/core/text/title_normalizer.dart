@@ -57,4 +57,14 @@ class TitleNormalizer {
     final first = parts.firstWhere((part) => part.trim().isNotEmpty, orElse: () => result);
     return first.trim();
   }
+
+  /// The Hive cache key for a song — same normalization as the LRCLIB
+  /// query, so a repeat play of a song normalizes to the same key even if
+  /// the notification's title/artist strings vary slightly between plays
+  /// (e.g. a player occasionally including "(Official Video)").
+  static String cacheKey(String title, String artist) {
+    final normalizedTitle = normalizeTitle(title).toLowerCase().trim();
+    final normalizedArtist = primaryArtist(artist).toLowerCase().trim();
+    return '$normalizedTitle::$normalizedArtist';
+  }
 }

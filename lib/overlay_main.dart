@@ -25,8 +25,8 @@ class OverlayApp extends StatelessWidget {
 class _LyricLine {
   final int? timestampMs; // null when this song has no LRC sync data
   final String original;
-  final String? phonetic; // Japanese songs only, once Goo Lab is configured
-  final String? translation; // once DeepL is configured
+  final String? phonetic; // Japanese songs only — computed on-device, no key needed
+  final String? translation; // once a DeepL key is configured
 
   const _LyricLine({
     required this.timestampMs,
@@ -44,16 +44,14 @@ class OverlayRoot extends StatefulWidget {
 }
 
 class _OverlayRootState extends State<OverlayRoot> {
-  // The native window itself is a fixed, generous size (see main.dart's
-  // showOverlay call) because this plugin's resizeOverlay() is broken —
-  // calling it from the overlay isolate throws MissingPluginException, so
-  // there's no reliable way to resize the real window per line. Instead the
-  // *visible* card sizes itself to content (mainAxisSize.min below) and
-  // sits at the top of the transparent window, so it still looks like a
-  // compact one-line overlay for a short lyric rather than a fixed block —
-  // only a genuinely long line grows the card, capped here with scroll
-  // fallback so it can never exceed the window's actual height.
-  static const double _maxCardHeight = 380;
+  // Fixed to comfortably fit the common case — every tier (원문/독음/번역) two
+  // lines deep — rather than either a single-line-tight budget (clips
+  // often) or a many-line-generous one (a bigger dead zone below the card
+  // blocks taps to whatever app is underneath; Android intercepts touches
+  // for the window's entire rectangle, not just its opaque pixels). A
+  // genuinely longer line still degrades gracefully via the scroll fallback
+  // below instead of being clipped outright.
+  static const double _maxCardHeight = 230;
 
   StreamSubscription<dynamic>? _messageSubscription;
   List<_LyricLine> _lines = const [];
@@ -61,7 +59,7 @@ class _OverlayRootState extends State<OverlayRoot> {
   String? _trackKey;
   int? _positionMs;
   int? _durationMs;
-  int _offsetMs = 0;
+  bool _fromCache = false;
 
   @override
   void initState() {
@@ -88,14 +86,20 @@ class _OverlayRootState extends State<OverlayRoot> {
   }
 
   void _onLyrics(Map event) {
+    final newTrackKey = event['trackKey'] as String?;
+    // A now-playing hiccup (e.g. some apps briefly clear their MediaSession metadata while
+    // seeking) can make the main engine re-detect "the same song" as a track change, which
+    // re-sends this same song's lyrics again. Treating that as a genuine new song would wipe
+    // _positionMs/_currentIndex for no reason — right when a real position ping would
+    // otherwise have kept things running smoothly — so only reset playback-tracking state
+    // when this actually is a different song.
+    final isGenuinelyNewTrack = newTrackKey != _trackKey;
     final found = event['found'] as bool? ?? false;
     final rawLines = event['lines'] as List<dynamic>? ?? const [];
     setState(() {
-      _trackKey = event['trackKey'] as String?;
+      _trackKey = newTrackKey;
       _durationMs = event['durationMs'] as int?;
-      _positionMs = null;
-      _offsetMs = 0;
-      _currentIndex = 0;
+      _fromCache = event['fromCache'] as bool? ?? false;
       _lines = found
           ? [
               for (final entry in rawLines)
@@ -107,6 +111,12 @@ class _OverlayRootState extends State<OverlayRoot> {
                 ),
             ]
           : const [];
+      if (isGenuinelyNewTrack) {
+        _positionMs = null;
+        _currentIndex = 0;
+      } else {
+        _recomputeCurrentIndex();
+      }
     });
   }
 
@@ -115,10 +125,24 @@ class _OverlayRootState extends State<OverlayRoot> {
     // one — they'd otherwise briefly show the wrong current line.
     if (event['trackKey'] != _trackKey) return;
     setState(() {
-      _positionMs = event['positionMs'] as int?;
+      final rawPositionMs = event['positionMs'] as int?;
+      _positionMs = rawPositionMs == null ? null : rawPositionMs + _relayDelayMs(event);
       _durationMs = (event['durationMs'] as int?) ?? _durationMs;
       _recomputeCurrentIndex();
     });
+  }
+
+  // How long this ping took to actually reach the overlay engine after the
+  // main engine captured it — the two engines' Dart isolates run in the same
+  // process, so DateTime.now() on both ends is directly comparable. Without
+  // this, the overlay renders positionMs as if it were current the instant
+  // it arrives, when it's really already however-long-the-shareData-hop-took
+  // old — the gap that made lyrics visibly trail the audio.
+  int _relayDelayMs(Map event) {
+    final capturedAtMs = event['capturedAtMs'] as int?;
+    if (capturedAtMs == null) return 0;
+    final delay = DateTime.now().millisecondsSinceEpoch - capturedAtMs;
+    return delay > 0 ? delay : 0; // guard against clock weirdness, never rewind
   }
 
 
@@ -126,10 +150,9 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   void _recomputeCurrentIndex() {
     if (!_isSynced || _positionMs == null) return;
-    final adjusted = _positionMs! + _offsetMs;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
-      if (_lines[i].timestampMs! <= adjusted) {
+      if (_lines[i].timestampMs! <= _positionMs!) {
         index = i;
       } else {
         break;
@@ -138,17 +161,34 @@ class _OverlayRootState extends State<OverlayRoot> {
     _currentIndex = index;
   }
 
-  void _adjustOffset(int deltaMs) {
-    if (!_isSynced) return;
-    setState(() {
-      _offsetMs += deltaMs;
-      _recomputeCurrentIndex();
-    });
-  }
-
   void _advanceManual() {
     if (_isSynced || _lines.isEmpty) return;
     setState(() => _currentIndex = (_currentIndex + 1) % _lines.length);
+  }
+
+  // In the first couple of seconds right after the overlay is freshly shown, the message
+  // channel back to the main engine isn't reliably wired up yet (OverlayService is still
+  // finishing its own setup) — a tap right in that window can silently go nowhere. Sending a
+  // couple of follow-up copies covers that gap without the user needing to notice and retap;
+  // _onExpandRequested() on the main-engine side ignores a duplicate if one already landed.
+  void _requestExpand() {
+    FlutterOverlayWindow.shareData({'type': 'expand'});
+    Future.delayed(const Duration(milliseconds: 500), () {
+      FlutterOverlayWindow.shareData({'type': 'expand'});
+    });
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      FlutterOverlayWindow.shareData({'type': 'expand'});
+    });
+  }
+
+  // Closing from the overlay's own X button is invisible to the main engine's _overlayActive
+  // state otherwise — it only finds out on its own next _refreshStatus() call (app resume,
+  // permission screen return, ...), so the home screen's toggle button would keep reading
+  // "오버레이 닫기" until then even though the overlay is already gone. Telling the main engine
+  // directly keeps that button truthful immediately.
+  void _requestClose() {
+    FlutterOverlayWindow.shareData({'type': 'closed'});
+    FlutterOverlayWindow.closeOverlay();
   }
 
   @override
@@ -184,7 +224,10 @@ class _OverlayRootState extends State<OverlayRoot> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     SizedBox(
-                      height: 32,
+                      // 44dp keeps both buttons close to Android's 48dp minimum comfortable
+                      // touch-target guidance — 32dp (matching the old icon-only visual size)
+                      // measured out as too small to reliably hit on a small floating card.
+                      height: 44,
                       child: Row(
                         children: [
                           const SizedBox(width: 12),
@@ -193,20 +236,49 @@ class _OverlayRootState extends State<OverlayRoot> {
                             color: Colors.white38,
                             size: 18,
                           ),
+                          if (_fromCache && _lines.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.bolt,
+                              color: Colors.amberAccent,
+                              size: 14,
+                            ),
+                            const SizedBox(width: 2),
+                            const Text(
+                              '캐시',
+                              style: TextStyle(color: Colors.white38, fontSize: 11),
+                            ),
+                          ],
                           const Spacer(),
                           IconButton(
-                            iconSize: 18,
+                            iconSize: 22,
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(
-                              minWidth: 32,
-                              minHeight: 32,
+                              minWidth: 44,
+                              minHeight: 44,
+                            ),
+                            icon: const Icon(
+                              Icons.open_in_full,
+                              color: Colors.white70,
+                            ),
+                            // The overlay engine has no native channels of its own (see
+                            // main.dart's part-of note) — shareData/overlayListener is the only
+                            // way back to the main engine, which is what actually brings the
+                            // app forward and pushes the full-screen route.
+                            onPressed: _requestExpand,
+                          ),
+                          IconButton(
+                            iconSize: 22,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(
+                              minWidth: 44,
+                              minHeight: 44,
                             ),
                             icon: const Icon(
                               Icons.close,
                               color: Colors.white70,
                             ),
-                            onPressed: () =>
-                                FlutterOverlayWindow.closeOverlay(),
+                            onPressed: _requestClose,
                           ),
                           const SizedBox(width: 8),
                         ],
@@ -214,9 +286,11 @@ class _OverlayRootState extends State<OverlayRoot> {
                     ),
                     // Capped so one outlier line can't push the card past
                     // _maxCardHeight — beyond the cap it scrolls instead.
+                    // 90 = the top bar (44) + progress bar row (~30) + the
+                    // padding around both.
                     ConstrainedBox(
                       constraints: const BoxConstraints(
-                        maxHeight: _maxCardHeight - 78,
+                        maxHeight: _maxCardHeight - 90,
                       ),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
@@ -282,6 +356,14 @@ class _OverlayRootState extends State<OverlayRoot> {
                       padding: const EdgeInsets.fromLTRB(14, 2, 6, 8),
                       child: Row(
                         children: [
+                          Text(
+                            _formatMs(_positionMs),
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
                           Expanded(
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(4),
@@ -295,14 +377,13 @@ class _OverlayRootState extends State<OverlayRoot> {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          _OffsetButton(
-                            label: '-1s',
-                            onTap: () => _adjustOffset(-1000),
-                          ),
-                          _OffsetButton(
-                            label: '+1s',
-                            onTap: () => _adjustOffset(1000),
+                          const SizedBox(width: 6),
+                          Text(
+                            _formatMs(_durationMs),
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                            ),
                           ),
                         ],
                       ),
@@ -316,26 +397,12 @@ class _OverlayRootState extends State<OverlayRoot> {
       ),
     );
   }
-}
 
-class _OffsetButton extends StatelessWidget {
-  final String label;
-  final VoidCallback onTap;
-
-  const _OffsetButton({required this.label, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 12),
-        ),
-      ),
-    );
+  String _formatMs(int? ms) {
+    if (ms == null || ms < 0) return '--:--';
+    final totalSeconds = ms ~/ 1000;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 }

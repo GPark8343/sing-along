@@ -1,0 +1,26 @@
+import 'package:hive_ce_flutter/hive_flutter.dart';
+
+import 'cached_lyric_line.dart';
+
+part 'cached_lyrics_entry.g.dart';
+
+/// One cache-box entry, keyed by TitleNormalizer.cacheKey — the full
+/// pipeline result (LRCLIB + phonetic + translation, whatever tiers were
+/// available at fetch time) so a repeat play of the same song is instant
+/// and touches no network at all. [found] is cached too, so a song with no
+/// lyrics on LRCLIB doesn't get re-queried every time it plays.
+@HiveType(typeId: 0)
+class CachedLyricsEntry {
+  @HiveField(0)
+  final bool found;
+  @HiveField(1)
+  final List<CachedLyricLine> lines;
+  @HiveField(2)
+  final DateTime cachedAt;
+
+  const CachedLyricsEntry({
+    required this.found,
+    required this.lines,
+    required this.cachedAt,
+  });
+}

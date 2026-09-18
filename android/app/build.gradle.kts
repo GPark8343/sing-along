@@ -36,6 +36,17 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    packaging {
+        // kuromoji-core and kuromoji-ipadic both bundle the same non-code
+        // metadata files (contributor list, license, notice) — harmless to
+        // drop, since none of it is read at runtime.
+        resources {
+            excludes += "META-INF/*.md"
+            excludes += "META-INF/LICENSE*"
+            excludes += "META-INF/NOTICE*"
+        }
+    }
 }
 
 kotlin {
@@ -46,4 +57,11 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Kanji -> kana morphological reading, entirely on-device — replaces the
+    // Claude round-trip for this step so it can't be cut off by Android's
+    // background process freeze (see JapaneseReadingHandler).
+    implementation("com.atilika.kuromoji:kuromoji-ipadic:0.9.0")
 }

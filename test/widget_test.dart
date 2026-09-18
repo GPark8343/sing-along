@@ -1,6 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 
+import 'package:sing_along/data/hive/models/cached_lyric_line.dart';
+import 'package:sing_along/data/hive/models/cached_lyrics_entry.dart';
 import 'package:sing_along/main.dart';
 
 void main() {
@@ -10,6 +15,13 @@ void main() {
   const notificationChannel = MethodChannel('sing_along/notification');
   const overlayChannel = MethodChannel('x-slayer/overlay_channel');
   const positionChannel = EventChannel('sing_along/playback_position');
+
+  setUpAll(() async {
+    final tempDir = await Directory.systemTemp.createTemp('sing_along_test');
+    Hive.init(tempDir.path);
+    Hive.registerAdapter(CachedLyricsEntryAdapter());
+    Hive.registerAdapter(CachedLyricLineAdapter());
+  });
 
   setUp(() {
     messenger.setMockMethodCallHandler(notificationChannel, (call) async {
@@ -45,7 +57,8 @@ void main() {
   });
 
   testWidgets('Home page renders permission onboarding', (WidgetTester tester) async {
-    await tester.pumpWidget(const SingAlongApp());
+    final box = await Hive.openBox<CachedLyricsEntry>('widget_test_lyrics_cache');
+    await tester.pumpWidget(SingAlongApp(lyricsBox: box));
     await tester.pump();
 
     expect(find.text('sing-along'), findsOneWidget);

@@ -96,9 +96,11 @@ class LrclibClient {
         }
       }
     }
-    // Below this, the "best" result is more likely a wrong song than a
-    // messily-formatted title of the right one.
-    if (best == null || bestScore < 0.45) return null;
+    // Strict on purpose: showing a completely different song's lyrics with
+    // full confidence is worse than honestly saying "not found" — a listener
+    // can tell the difference between "no lyrics" and "wrong lyrics" only by
+    // already knowing the song, which defeats the point of the app.
+    if (best == null || bestScore < 0.75) return null;
     return _parse(best);
   }
 

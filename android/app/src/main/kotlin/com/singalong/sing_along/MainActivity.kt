@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.singalong.sing_along.bridge.JapaneseReadingHandler
 import com.singalong.sing_along.bridge.NotificationChannelHandler
 import com.singalong.sing_along.bridge.PlaybackPositionStreamHandler
 import io.flutter.embedding.android.FlutterActivity
@@ -39,5 +40,10 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             "sing_along/playback_position"
         ).setStreamHandler(PlaybackPositionStreamHandler())
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            JapaneseReadingHandler.CHANNEL_NAME
+        ).setMethodCallHandler(JapaneseReadingHandler())
     }
 }

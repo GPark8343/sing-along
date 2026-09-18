@@ -7,6 +7,7 @@ import android.provider.Settings;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationManagerCompat;
 
+import com.singalong.sing_along.MainActivity;
 import com.singalong.sing_along.notification.MediaSessionBridge;
 import com.singalong.sing_along.notification.NowPlayingInfo;
 
@@ -44,6 +45,10 @@ public class NotificationChannelHandler implements MethodChannel.MethodCallHandl
                 NowPlayingInfo current = MediaSessionBridge.getInstance().getCurrent();
                 result.success(current != null ? current.toMap() : null);
                 break;
+            case "bringToFront":
+                bringMainActivityToFront();
+                result.success(null);
+                break;
             default:
                 result.notImplemented();
         }
@@ -57,6 +62,16 @@ public class NotificationChannelHandler implements MethodChannel.MethodCallHandl
     private void openNotificationListenerSettings() {
         Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        appContext.startActivity(intent);
+    }
+
+    // Called when the user taps "expand" on the floating overlay — the overlay is a separate
+    // window/Service, not the Activity, so bringing the full-screen lyrics view up means
+    // resurfacing MainActivity itself (it's still running in the background; this doesn't
+    // create a new instance, just reorders the existing task to the front).
+    private void bringMainActivityToFront() {
+        Intent intent = new Intent(appContext, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         appContext.startActivity(intent);
     }
 }
