@@ -60,6 +60,7 @@ class _OverlayRootState extends State<OverlayRoot> {
   int? _positionMs;
   int? _durationMs;
   bool _fromCache = false;
+  bool _loadingLyrics = false;
 
   @override
   void initState() {
@@ -87,6 +88,19 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   void _onLyrics(Map event) {
     final newTrackKey = event['trackKey'] as String?;
+    // Sent the instant a track change is detected, before the (possibly several-second)
+    // lookup even starts — shows a loading state instead of leaving the previous song's
+    // lines on screen with nothing indicating they're stale.
+    if (event['loading'] == true) {
+      setState(() {
+        _loadingLyrics = true;
+        _trackKey = newTrackKey;
+        _lines = const [];
+        _positionMs = null;
+        _currentIndex = 0;
+      });
+      return;
+    }
     // A now-playing hiccup (e.g. some apps briefly clear their MediaSession metadata while
     // seeking) can make the main engine re-detect "the same song" as a track change, which
     // re-sends this same song's lyrics again. Treating that as a genuine new song would wipe
@@ -97,6 +111,7 @@ class _OverlayRootState extends State<OverlayRoot> {
     final found = event['found'] as bool? ?? false;
     final rawLines = event['lines'] as List<dynamic>? ?? const [];
     setState(() {
+      _loadingLyrics = false;
       _trackKey = newTrackKey;
       _durationMs = event['durationMs'] as int?;
       _fromCache = event['fromCache'] as bool? ?? false;
@@ -173,13 +188,12 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   void _advanceLine(int delta) {
     if (_isSynced || _lines.isEmpty) return;
-    setState(() {
-      // Dart's % can return a negative result for a negative dividend (e.g. -1 % 5 == -1,
-      // not 4), so wrap it back into range explicitly rather than assuming it wraps like a
-      // typical "positive modulo".
-      _currentIndex = (_currentIndex + delta) % _lines.length;
-      if (_currentIndex < 0) _currentIndex += _lines.length;
-    });
+    // Clamped, not wrapped — tapping left on the first line or right on the last does
+    // nothing, rather than looping around to the other end, which reads as a bug ("why did
+    // it jump to the end?") more than a feature.
+    final next = (_currentIndex + delta).clamp(0, _lines.length - 1);
+    if (next == _currentIndex) return;
+    setState(() => _currentIndex = next);
   }
 
   // In the first couple of seconds right after the overlay is freshly shown, the message
@@ -345,10 +359,14 @@ class _OverlayRootState extends State<OverlayRoot> {
                             child: SingleChildScrollView(
                               child: Center(
                               child: currentLine == null
-                                  ? const Text(
-                                      '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요',
+                                  ? Text(
+                                      _loadingLyrics
+                                          ? '가사 불러오는 중...'
+                                          : (_trackKey != null
+                                              ? '가사를 찾을 수 없음'
+                                              : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요'),
                                       textAlign: TextAlign.center,
-                                      style: TextStyle(
+                                      style: const TextStyle(
                                         color: Colors.white70,
                                         fontSize: 14,
                                       ),

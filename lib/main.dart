@@ -201,6 +201,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     _stopDebounceTimer?.cancel();
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
+    // Sent immediately, before the (possibly several-second, for an uncached song) fetch
+    // below even starts — otherwise the overlay/full-screen page just keep showing the
+    // previous song's lines with nothing telling the user that's stale, right through the
+    // window where it's most likely to be confusing.
+    await FlutterOverlayWindow.shareData({
+      'type': 'lyrics',
+      'loading': true,
+      'trackKey': nowPlaying.trackKey,
+      'title': nowPlaying.title,
+      'artist': nowPlaying.artist ?? '',
+    });
     final result = await _lyricsRepository.getLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',

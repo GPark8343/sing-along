@@ -36,6 +36,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   NowPlaying? _nowPlaying;
   late String? _currentTrackKey;
   int _currentIndex = 0;
+  bool _loadingLyrics = false;
   StreamSubscription<NowPlaying?>? _positionSub;
   StreamSubscription<NowPlaying?>? _trackChangeSub;
 
@@ -70,7 +71,13 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
       if (mounted) setState(() => _lines = const []);
       return;
     }
-    if (mounted) setState(() => _nowPlaying = nowPlaying);
+    if (mounted) {
+      setState(() {
+        _nowPlaying = nowPlaying;
+        _loadingLyrics = true;
+        _lines = const [];
+      });
+    }
     final result = await widget.lyricsRepository.getLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
@@ -78,6 +85,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     );
     if (!mounted) return;
     setState(() {
+      _loadingLyrics = false;
       _lines = result.found ? result.lines : const [];
       _currentIndex = 0;
     });
@@ -106,6 +114,13 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     }
   }
 
+  String _titleAndArtist() {
+    final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
+    if (nowPlaying == null) return '가사';
+    final artist = nowPlaying.artist;
+    return (artist == null || artist.isEmpty) ? nowPlaying.title : '${nowPlaying.title} - $artist';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -114,9 +129,9 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         elevation: 0,
-        title: Text(
-          _nowPlaying?.title ?? widget.initialNowPlaying?.title ?? '가사',
-          overflow: TextOverflow.ellipsis,
+        title: _MarqueeText(
+          text: _titleAndArtist(),
+          style: const TextStyle(color: Colors.white, fontSize: 18),
         ),
         actions: [
           if (_lines.isNotEmpty)
@@ -133,8 +148,11 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
         ],
       ),
       body: _lines.isEmpty
-          ? const Center(
-              child: Text('가사를 찾을 수 없음', style: TextStyle(color: Colors.white54)),
+          ? Center(
+              child: Text(
+                _loadingLyrics ? '가사 불러오는 중...' : '가사를 찾을 수 없음',
+                style: const TextStyle(color: Colors.white54),
+              ),
             )
           : ScrollablePositionedList.builder(
               itemScrollController: _scrollController,
@@ -192,6 +210,94 @@ class _LyricRow extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// A single-line text that, if too long to fit its available width, slides left to reveal
+/// the rest and then slides back to the start — otherwise renders as plain static text, since
+/// a long title+artist string is common enough in the AppBar to be worth handling, but most
+/// are short enough that animating them would just be motion for no reason.
+class _MarqueeText extends StatefulWidget {
+  const _MarqueeText({required this.text, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  State<_MarqueeText> createState() => _MarqueeTextState();
+}
+
+class _MarqueeTextState extends State<_MarqueeText> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _progress;
+
+  // Holds at the start (readable), sweeps left to fully reveal the end (also readable, held
+  // briefly), then jumps straight back to the start and sweeps left again — one direction
+  // only, never backtracking, unlike AnimationController's built-in reverse ping-pong.
+  static const double _holdStart = 0.12;
+  static const double _holdEnd = 0.82;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 12))
+      ..repeat();
+    _progress = CurvedAnimation(
+      parent: _controller,
+      curve: const Interval(_holdStart, _holdEnd, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _MarqueeText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) {
+      _controller
+        ..reset()
+        ..repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // AppBar's title slot doesn't reliably hand LayoutBuilder a *bounded* width — it can come
+    // through as infinite depending on how leading/actions lay out — which made the overflow
+    // check below always read "fits" and fall back to a static, ellipsized Text no matter how
+    // long the title actually was. Computing the available width ourselves from the screen
+    // size (roughly netting out the back button and the sync icon on the right) sidesteps
+    // that instead of depending on it.
+    final availableWidth = MediaQuery.of(context).size.width - 172;
+    final painter = TextPainter(
+      text: TextSpan(text: widget.text, style: widget.style),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final overflow = (painter.width - availableWidth).clamp(0.0, double.infinity);
+    return SizedBox(
+      width: availableWidth,
+      child: ClipRect(
+        child: AnimatedBuilder(
+          animation: _progress,
+          builder: (context, child) => Transform.translate(
+            offset: Offset(-overflow * _progress.value, 0),
+            child: child,
+          ),
+          child: Text(
+            widget.text,
+            style: widget.style,
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.visible,
+          ),
+        ),
       ),
     );
   }
