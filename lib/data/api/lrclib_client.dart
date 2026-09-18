@@ -13,8 +13,9 @@ class LrclibLyrics {
     required this.instrumental,
   });
 
-  bool get hasLyrics =>
-      !instrumental && ((plainLyrics?.trim().isNotEmpty ?? false) || (syncedLyrics?.trim().isNotEmpty ?? false));
+  bool get hasSyncedLyrics => syncedLyrics?.trim().isNotEmpty ?? false;
+
+  bool get hasLyrics => !instrumental && (hasSyncedLyrics || (plainLyrics?.trim().isNotEmpty ?? false));
 }
 
 class LrclibClient {
@@ -51,21 +52,26 @@ class LrclibClient {
     required String artistName,
     int? durationSeconds,
   }) async {
-    final exactWithDuration = await _getExact(trackName, artistName, durationSeconds);
-    if (exactWithDuration != null) return exactWithDuration;
+    final exact = await _getExact(trackName, artistName, durationSeconds) ??
+        await _getExact(trackName, artistName, null);
 
-    final exactNoDuration = await _getExact(trackName, artistName, null);
-    if (exactNoDuration != null) return exactNoDuration;
+    // /get returns exactly one record — there's nothing to prefer among alternatives the
+    // way there is with /search below. But LRCLIB often has more than one submission for the
+    // same song (different contributors, some plain-only, some synced), and /get isn't
+    // guaranteed to be the synced one even when a synced version exists under a different
+    // record. A synced result is worth a lot more than the marginal cost of one extra
+    // request, so when the exact hit lacks sync, check whether search can do better before
+    // settling for plain.
+    if (exact != null && exact.hasSyncedLyrics) return exact;
 
     final candidates = _titleCandidates(trackName);
+    final searched = await _searchBestAcross(candidates, artistName, durationSeconds) ??
+        (artistName.isNotEmpty ? await _searchBestAcross(candidates, '', durationSeconds) : null);
 
-    final searched = await _searchBestAcross(candidates, artistName, durationSeconds);
-    if (searched != null) return searched;
-
-    if (artistName.isNotEmpty) {
-      return _searchBestAcross(candidates, '', durationSeconds);
-    }
-    return null;
+    if (searched != null && searched.hasSyncedLyrics) return searched;
+    // Neither source had a synced version — fall back to whichever had lyrics at all,
+    // preferring the exact match since it's the more precisely-identified record.
+    return exact ?? searched;
   }
 
   List<String> _titleCandidates(String trackName) {
@@ -139,6 +145,12 @@ class LrclibClient {
       if (resultDuration != null && (resultDuration - durationSeconds).abs() <= 3) {
         score += 0.05; // tie-break nudge for a close duration match
       }
+    }
+    // A small nudge, not a rescue — this only ever breaks a near-tie between two otherwise
+    // similarly-matching submissions of the same song in favor of the synced one, it can't
+    // push a genuinely poor title/artist match over the acceptance threshold on its own.
+    if ((result['syncedLyrics'] as String?)?.trim().isNotEmpty ?? false) {
+      score += 0.03;
     }
     return score;
   }

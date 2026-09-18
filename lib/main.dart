@@ -68,6 +68,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _expandRequestInFlight = false;
   bool _toggleInFlight = false;
   Timer? _stopDebounceTimer;
+  bool _overlayPositionSendInFlight = false;
 
   @override
   void initState() {
@@ -90,20 +91,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _positionSubscription = _watcher.positionStream.listen((event) {
       if (!mounted) return;
       setState(() => _nowPlaying = event);
-      if (_overlayActive) {
-        FlutterOverlayWindow.shareData({
-          'type': 'position',
-          'trackKey': event?.trackKey,
-          'positionMs': event?.positionMs,
-          'durationMs': event?.durationMs,
-          // Captured right as this engine received the native tick — the
-          // overlay adds however long it took THIS ping to actually reach it
-          // (the shareData hop between the two engines, which isn't free)
-          // back onto positionMs, instead of quietly rendering an
-          // already-stale position as if it were current.
-          'capturedAtMs': DateTime.now().millisecondsSinceEpoch,
-        });
-      }
+      if (_overlayActive) _sendPositionToOverlay(event);
     });
     _trackChangeSubscription = _watcher.trackChanges.listen(_onTrackChanged);
     _refreshStatus();
@@ -117,6 +105,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _overlayMessageSubscription?.cancel();
     _stopDebounceTimer?.cancel();
     super.dispose();
+  }
+
+  // The native side ticks every 16ms, but shareData() is a real cross-engine round trip
+  // (JSON encode, dispatch, wait for a reply) that reliably takes longer than that — firing
+  // one off on every single tick without waiting for the previous one to land queues up a
+  // pile of overlapping sends. Flutter's full-screen page never has this problem (it reads
+  // the position stream directly, same engine, no IPC at all), which is exactly why it kept
+  // syncing fine while the overlay didn't. Skipping a tick whenever a send is already in
+  // flight naturally paces this to whatever the channel can actually keep up with, instead
+  // of a fixed interval that might still be too fast on a slower device.
+  DateTime? _lastOverlaySendAt; // TEMPORARY diagnostic
+
+  Future<void> _sendPositionToOverlay(NowPlaying? event) async {
+    if (_overlayPositionSendInFlight) return;
+    _overlayPositionSendInFlight = true;
+    try {
+      await FlutterOverlayWindow.shareData({
+        'type': 'position',
+        'trackKey': event?.trackKey,
+        'positionMs': event?.positionMs,
+        'durationMs': event?.durationMs,
+        // Captured right as this engine received the native tick — the
+        // overlay adds however long it took THIS ping to actually reach it
+        // (the shareData hop between the two engines, which isn't free)
+        // back onto positionMs, instead of quietly rendering an
+        // already-stale position as if it were current.
+        'capturedAtMs': DateTime.now().millisecondsSinceEpoch,
+      });
+      final now = DateTime.now();
+      if (_lastOverlaySendAt != null) {
+        final gapMs = now.difference(_lastOverlaySendAt!).inMilliseconds;
+        if (gapMs > 500) {
+          debugPrint('[sing-along] overlay send GAP ${gapMs}ms');
+        }
+      }
+      _lastOverlaySendAt = now;
+    } finally {
+      _overlayPositionSendInFlight = false;
+    }
   }
 
   Future<void> _onExpandRequested() async {

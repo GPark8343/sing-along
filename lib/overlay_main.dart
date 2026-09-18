@@ -120,10 +120,20 @@ class _OverlayRootState extends State<OverlayRoot> {
     });
   }
 
+  DateTime? _lastOverlayReceiveAt; // TEMPORARY diagnostic
+
   void _onPosition(Map event) {
     // Ignore position pings meant for whatever song was playing before this
     // one — they'd otherwise briefly show the wrong current line.
     if (event['trackKey'] != _trackKey) return;
+    final now = DateTime.now();
+    if (_lastOverlayReceiveAt != null) {
+      final gapMs = now.difference(_lastOverlayReceiveAt!).inMilliseconds;
+      if (gapMs > 500) {
+        debugPrint('[sing-along] overlay RECEIVE GAP ${gapMs}ms');
+      }
+    }
+    _lastOverlayReceiveAt = now;
     setState(() {
       final rawPositionMs = event['positionMs'] as int?;
       _positionMs = rawPositionMs == null ? null : rawPositionMs + _relayDelayMs(event);
@@ -161,9 +171,15 @@ class _OverlayRootState extends State<OverlayRoot> {
     _currentIndex = index;
   }
 
-  void _advanceManual() {
+  void _advanceLine(int delta) {
     if (_isSynced || _lines.isEmpty) return;
-    setState(() => _currentIndex = (_currentIndex + 1) % _lines.length);
+    setState(() {
+      // Dart's % can return a negative result for a negative dividend (e.g. -1 % 5 == -1,
+      // not 4), so wrap it back into range explicitly rather than assuming it wraps like a
+      // typical "positive modulo".
+      _currentIndex = (_currentIndex + delta) % _lines.length;
+      if (_currentIndex < 0) _currentIndex += _lines.length;
+    });
   }
 
   // In the first couple of seconds right after the overlay is freshly shown, the message
@@ -249,6 +265,19 @@ class _OverlayRootState extends State<OverlayRoot> {
                               style: TextStyle(color: Colors.white38, fontSize: 11),
                             ),
                           ],
+                          if (_lines.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Tooltip(
+                              message: _isSynced
+                                  ? '싱크됨 — 자동으로 넘어감'
+                                  : '싱크 없음 — 좌우 탭으로 넘기세요',
+                              child: Icon(
+                                _isSynced ? Icons.sync : Icons.sync_disabled,
+                                color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
+                                size: 14,
+                              ),
+                            ),
+                          ],
                           const Spacer(),
                           IconButton(
                             iconSize: 22,
@@ -297,11 +326,24 @@ class _OverlayRootState extends State<OverlayRoot> {
                           horizontal: 20,
                           vertical: 8,
                         ),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: _advanceManual,
-                          child: SingleChildScrollView(
-                            child: Center(
+                        child: LayoutBuilder(
+                          builder: (context, constraints) => GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            // Plain (unsynced) lyrics have no timestamps to auto-advance
+                            // by, so the only way through them is manual — tap the right
+                            // half of the card for the next line, left half for the
+                            // previous one. Synced lyrics already advance on their own,
+                            // so a tap does nothing there rather than fighting the
+                            // position-driven line.
+                            onTapUp: _isSynced || _lines.isEmpty
+                                ? null
+                                : (details) => _advanceLine(
+                                    details.localPosition.dx > constraints.maxWidth / 2
+                                        ? 1
+                                        : -1,
+                                  ),
+                            child: SingleChildScrollView(
+                              child: Center(
                               child: currentLine == null
                                   ? const Text(
                                       '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요',
@@ -347,6 +389,7 @@ class _OverlayRootState extends State<OverlayRoot> {
                                         ],
                                       ],
                                     ),
+                              ),
                             ),
                           ),
                         ),

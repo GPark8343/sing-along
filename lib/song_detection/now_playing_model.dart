@@ -32,7 +32,14 @@ class NowPlaying {
   }
 
   /// Identity used to detect a track change, independent of playback position ticks.
-  String get trackKey => '${artist ?? ''}::$title';
+  /// Title alone, not title+artist — some apps briefly report an empty artist during a
+  /// metadata transition (mid-buffer, mid-seek) for what's still the same song, and an
+  /// artist-inclusive key would read that as switching to a whole different track. That
+  /// mismatch is permanent once it happens: the sync guard downstream (does this position
+  /// ping's trackKey match what's currently displayed?) would reject every future ping for
+  /// the "old" key forever. Two different songs sharing an identical title is the accepted
+  /// trade-off, and a much rarer case than this flicker.
+  String get trackKey => title;
 
   @override
   String toString() => 'NowPlaying($title / $artist, pos=${positionMs}ms)';

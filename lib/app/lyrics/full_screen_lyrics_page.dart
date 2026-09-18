@@ -39,6 +39,8 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   StreamSubscription<NowPlaying?>? _positionSub;
   StreamSubscription<NowPlaying?>? _trackChangeSub;
 
+  bool get _isSynced => _lines.isNotEmpty && _lines.first.timestampMs != null;
+
   @override
   void initState() {
     super.initState();
@@ -116,6 +118,19 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
           _nowPlaying?.title ?? widget.initialNowPlaying?.title ?? '가사',
           overflow: TextOverflow.ellipsis,
         ),
+        actions: [
+          if (_lines.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Tooltip(
+                message: _isSynced ? '싱크됨 — 자동으로 넘어감' : '싱크 없음 — 직접 스크롤해서 보세요',
+                child: Icon(
+                  _isSynced ? Icons.sync : Icons.sync_disabled,
+                  color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
+                ),
+              ),
+            ),
+        ],
       ),
       body: _lines.isEmpty
           ? const Center(
@@ -149,8 +164,8 @@ class _LyricRow extends StatelessWidget {
         children: [
           Text(
             line.original,
-            style: TextStyle(
-              color: isCurrent ? Colors.white54 : Colors.white24,
+            style: const TextStyle(
+              color: Colors.white70,
               fontSize: 15,
             ),
           ),
@@ -158,8 +173,8 @@ class _LyricRow extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               line.phonetic!,
-              style: TextStyle(
-                color: isCurrent ? Colors.white38 : Colors.white12,
+              style: const TextStyle(
+                color: Colors.white70,
                 fontSize: 13,
                 fontStyle: FontStyle.italic,
               ),
@@ -170,7 +185,7 @@ class _LyricRow extends StatelessWidget {
             Text(
               line.translation!,
               style: TextStyle(
-                color: isCurrent ? Colors.white : Colors.white30,
+                color: Colors.white70,
                 fontSize: isCurrent ? 24 : 18,
                 fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
               ),
