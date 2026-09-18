@@ -62,6 +62,10 @@ class _OverlayRootState extends State<OverlayRoot> {
   bool _fromCache = false;
   bool _loadingLyrics = false;
   bool _isUserPasted = false;
+  // Set from the full-screen page's sync toggle (this card has no room for its own control) —
+  // when true, treated exactly like a song with no sync data at all: no auto-advance, manual
+  // left/right tap navigation instead.
+  bool _syncDisabledByUser = false;
 
   @override
   void initState() {
@@ -117,6 +121,7 @@ class _OverlayRootState extends State<OverlayRoot> {
       _durationMs = event['durationMs'] as int?;
       _fromCache = event['fromCache'] as bool? ?? false;
       _isUserPasted = event['isUserPasted'] as bool? ?? false;
+      _syncDisabledByUser = event['syncDisabled'] as bool? ?? false;
       _lines = found
           ? [
               for (final entry in rawLines)
@@ -163,7 +168,8 @@ class _OverlayRootState extends State<OverlayRoot> {
   }
 
 
-  bool get _isSynced => _lines.isNotEmpty && _lines.first.timestampMs != null;
+  bool get _isSynced =>
+      _lines.isNotEmpty && _lines.first.timestampMs != null && !_syncDisabledByUser;
 
   void _recomputeCurrentIndex() {
     if (!_isSynced || _positionMs == null) return;

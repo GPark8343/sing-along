@@ -21,7 +21,9 @@ class FullScreenLyricsPage extends StatefulWidget {
     required this.initialNowPlaying,
     required this.initialLines,
     this.initialIsUserPasted = false,
+    this.initialSyncDisabled = false,
     this.onLyricsEdited,
+    this.onSyncToggled,
   });
 
   final NowPlayingWatcher watcher;
@@ -29,17 +31,23 @@ class FullScreenLyricsPage extends StatefulWidget {
   final NowPlaying? initialNowPlaying;
   final List<LyricsLine> initialLines;
   final bool initialIsUserPasted;
+  final bool initialSyncDisabled;
   // Called after a paste-in or a refetch-from-API succeeds, so the main engine (and, through
   // it, the small overlay — this page can't reach the overlay directly, only the main engine's
   // own shareData channel can) picks up the edit immediately instead of sitting on whatever it
   // had before until the next natural track change.
-  final Future<void> Function(NowPlaying nowPlaying, LyricsResult result)? onLyricsEdited;
+  final Future<void> Function(NowPlaying nowPlaying, LyricsResult result)?
+  onLyricsEdited;
+  // Called when the user taps the sync icon to turn synced auto-scroll off (a match that
+  // looks right but feels off in practice) or back on — same propagation reason as above.
+  final Future<void> Function(bool disabled)? onSyncToggled;
 
   @override
   State<FullScreenLyricsPage> createState() => _FullScreenLyricsPageState();
 }
 
-class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
+class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
+    with WidgetsBindingObserver {
   final ItemScrollController _scrollController = ItemScrollController();
   final TextEditingController _pasteController = TextEditingController();
   late List<LyricsLine> _lines;
@@ -48,27 +56,62 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   int _currentIndex = 0;
   bool _loadingLyrics = false;
   bool _savingPastedLyrics = false;
-  bool _showPasteForm = false; // opened either automatically (not-found) or manually (wrong lyrics)
+  bool _showPasteForm =
+      false; // opened either automatically (not-found) or manually (wrong lyrics)
   bool _isUserPasted = false;
   bool _refetchingFromApi = false;
+  bool _syncManuallyDisabled = false;
+  // True only while the user's finger is actually on the list (set/cleared by a
+  // NotificationListener<ScrollNotification> below, keyed off a real drag gesture — never by
+  // our own programmatic scrollTo, so this can't self-trigger). A line change that lands
+  // mid-drag just updates the highlight and leaves the view alone; the first one that lands
+  // *after* they let go — whenever that naturally happens — is what re-centers it.
+  bool _userDragging = false;
   StreamSubscription<NowPlaying?>? _positionSub;
   StreamSubscription<NowPlaying?>? _trackChangeSub;
 
-  bool get _isSynced => _lines.isNotEmpty && _lines.first.timestampMs != null;
+  bool get _hasSyncData =>
+      _lines.isNotEmpty && _lines.first.timestampMs != null;
+  bool get _isSynced => _hasSyncData && !_syncManuallyDisabled;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _lines = widget.initialLines;
     _nowPlaying = widget.initialNowPlaying;
     _currentTrackKey = widget.initialNowPlaying?.trackKey;
     _isUserPasted = widget.initialIsUserPasted;
+    _syncManuallyDisabled = widget.initialSyncDisabled;
     _positionSub = widget.watcher.positionStream.listen(_onPosition);
     _trackChangeSub = widget.watcher.trackChanges.listen(_onTrackChanged);
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // A real finger-drag always ends with a clean ScrollEndNotification, but if the app gets
+    // backgrounded mid-drag (a call comes in, the user hits home, ...) the gesture can be torn
+    // down without one ever firing — leaving _userDragging stuck true and auto-recentering
+    // permanently stuck off for the rest of this song. Coming back to the foreground is a safe
+    // point to assume any drag that was happening is definitely over.
+    if (state == AppLifecycleState.resumed) {
+      _userDragging = false;
+    }
+  }
+
+  // Reversible any number of times for as long as this song keeps playing — the next genuine
+  // track change (see _onTrackChanged) resets it back to synced-by-default.
+  Future<void> _toggleSync() async {
+    final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
+    setState(() => _syncManuallyDisabled = !_syncManuallyDisabled);
+    if (nowPlaying != null) {
+      await widget.onSyncToggled?.call(_syncManuallyDisabled);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _positionSub?.cancel();
     _trackChangeSub?.cancel();
     _pasteController.dispose();
@@ -83,7 +126,9 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   Future<void> _savePastedLyrics() async {
     final text = _pasteController.text;
     final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
-    if (text.trim().isEmpty || nowPlaying == null || _savingPastedLyrics) return;
+    if (text.trim().isEmpty || nowPlaying == null || _savingPastedLyrics) {
+      return;
+    }
     setState(() => _savingPastedLyrics = true);
     final result = await widget.lyricsRepository.savePastedLyrics(
       title: nowPlaying.title,
@@ -116,7 +161,9 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     final result = await widget.lyricsRepository.refetchFromApi(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
-      durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
+      durationSeconds: nowPlaying.durationMs > 0
+          ? (nowPlaying.durationMs / 1000).round()
+          : null,
     );
     if (!mounted) return;
     setState(() {
@@ -146,14 +193,19 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
         _nowPlaying = nowPlaying;
         _loadingLyrics = true;
         _lines = const [];
-        _showPasteForm = false; // a paste form left open for the previous song is stale here
+        _showPasteForm =
+            false; // a paste form left open for the previous song is stale here
         _pasteController.clear();
+        _syncManuallyDisabled =
+            false; // a sync-off choice belonged to the last song, not this one
       });
     }
     final result = await widget.lyricsRepository.getLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
-      durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
+      durationSeconds: nowPlaying.durationMs > 0
+          ? (nowPlaying.durationMs / 1000).round()
+          : null,
     );
     // Another track change (a fast skip, or several) may have landed while this fetch was
     // still running — _currentTrackKey would have moved on by now, so this result is for a
@@ -169,7 +221,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
   }
 
   void _onPosition(NowPlaying? nowPlaying) {
-    if (nowPlaying == null || _lines.isEmpty || _lines.first.timestampMs == null) return;
+    if (nowPlaying == null || _lines.isEmpty || !_isSynced) return;
     _nowPlaying = nowPlaying;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
@@ -181,6 +233,11 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     }
     if (index == _currentIndex) return;
     setState(() => _currentIndex = index);
+    // The current line still updates/highlights normally either way — it's only the
+    // programmatic re-centering that a drag defers, not the tracking itself. Checked live
+    // (not a sticky flag) so the very next change after they let go — not the one still
+    // in-flight when they did — is what resumes centering.
+    if (_userDragging) return;
     if (_scrollController.isAttached) {
       _scrollController.scrollTo(
         index: index,
@@ -195,7 +252,9 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
     final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
     if (nowPlaying == null) return '가사';
     final artist = nowPlaying.artist;
-    return (artist == null || artist.isEmpty) ? nowPlaying.title : '${nowPlaying.title} - $artist';
+    return (artist == null || artist.isEmpty)
+        ? nowPlaying.title
+        : '${nowPlaying.title} - $artist';
   }
 
   @override
@@ -215,64 +274,113 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage> {
       child: Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
-        backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        title: _MarqueeText(
-          text: _titleAndArtist(),
-          style: const TextStyle(color: Colors.white, fontSize: 18),
-        ),
-        actions: [
-          if (_lines.isNotEmpty && !_showPasteForm) ...[
-            Tooltip(
-              message: _isSynced ? '싱크됨 — 자동으로 넘어감' : '싱크 없음 — 직접 스크롤해서 보세요',
-              child: Icon(
-                _isSynced ? Icons.sync : Icons.sync_disabled,
-                color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
-              ),
-            ),
-            IconButton(
-              tooltip: '가사가 틀렸나요? 직접 입력',
-              icon: const Icon(Icons.edit_note, color: Colors.white70),
-              onPressed: () => setState(() => _showPasteForm = true),
-            ),
-            if (_isUserPasted)
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          title: _MarqueeText(
+            text: _titleAndArtist(),
+            style: const TextStyle(color: Colors.white, fontSize: 18),
+          ),
+          actions: [
+            if (_lines.isNotEmpty && !_showPasteForm) ...[
+              if (_hasSyncData)
+                // Real sync data exists for this song — tappable, so a match that looks right
+                // but feels off in practice (an odd LRCLIB timing offset, etc.) can be turned
+                // off, and back on again, any number of times.
+                IconButton(
+                  tooltip: _isSynced
+                      ? '싱크됨 — 자동으로 넘어감 (탭하면 끄기)'
+                      : '싱크 꺼짐(수동) — 탭하면 다시 켜기',
+                  icon: Icon(
+                    _isSynced ? Icons.sync : Icons.sync_disabled,
+                    color: _isSynced
+                        ? Colors.lightGreenAccent
+                        : Colors.orangeAccent,
+                  ),
+                  onPressed: _toggleSync,
+                )
+              else
+                // No sync data at all for this song (unsynced fetch, or a paste-in) — nothing to
+                // toggle, so this is just a plain indicator like before.
+                const Tooltip(
+                  message: '싱크 없음 — 직접 스크롤해서 보세요',
+                  child: Icon(Icons.sync_disabled, color: Colors.orangeAccent),
+                ),
               IconButton(
-                tooltip: '직접 입력한 가사를 버리고 원본을 다시 불러오기',
-                icon: _refetchingFromApi
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
-                      )
-                    : const Icon(Icons.refresh, color: Colors.white70),
-                onPressed: _refetchingFromApi ? null : _refetchOriginalFromApi,
+                tooltip: '가사가 틀렸나요? 직접 입력',
+                icon: const Icon(Icons.edit_note, color: Colors.white70),
+                onPressed: () => setState(() => _showPasteForm = true),
               ),
+              if (_isUserPasted)
+                IconButton(
+                  tooltip: '직접 입력한 가사를 버리고 원본을 다시 불러오기',
+                  icon: _refetchingFromApi
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white70,
+                          ),
+                        )
+                      : const Icon(Icons.refresh, color: Colors.white70),
+                  onPressed: _refetchingFromApi
+                      ? null
+                      : _refetchOriginalFromApi,
+                ),
+            ],
           ],
-        ],
-      ),
-      body: _loadingLyrics
-          ? const Center(
-              child: Text('가사 불러오는 중...', style: TextStyle(color: Colors.white54)),
-            )
-          : (_lines.isEmpty || _showPasteForm)
+        ),
+        // The AppBar already accounts for the top inset, so only the bottom (system navigation
+        // bar) needs guarding here.
+        body: SafeArea(
+          top: false,
+          child: _loadingLyrics
+              ? const Center(
+                  child: Text(
+                    '가사 불러오는 중...',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                )
+              : (_lines.isEmpty || _showPasteForm)
               ? _PasteLyricsForm(
                   controller: _pasteController,
                   saving: _savingPastedLyrics,
                   onSave: _savePastedLyrics,
                   // Only offer a way out without saving when there's something to go back
                   // to — the auto-opened not-found form has nothing behind it to cancel to.
-                  onCancel: _lines.isNotEmpty ? () => setState(() => _showPasteForm = false) : null,
+                  onCancel: _lines.isNotEmpty
+                      ? () => setState(() => _showPasteForm = false)
+                      : null,
                 )
-          : ScrollablePositionedList.builder(
-              itemScrollController: _scrollController,
-              itemCount: _lines.length,
-              padding: const EdgeInsets.symmetric(vertical: 140, horizontal: 24),
-              itemBuilder: (context, index) => _LyricRow(
-                line: _lines[index],
-                isCurrent: index == _currentIndex,
-              ),
-            ),
+              : NotificationListener<ScrollNotification>(
+                  // dragDetails is only non-null for a real finger-driven drag — our own
+                  // scrollTo() below animates the list too and fires these same
+                  // notifications, but never with dragDetails, so this can't mistake its
+                  // own programmatic scroll for the user grabbing the list.
+                  onNotification: (notification) {
+                    if (notification is ScrollStartNotification &&
+                        notification.dragDetails != null) {
+                      _userDragging = true;
+                    } else if (notification is ScrollEndNotification) {
+                      _userDragging = false;
+                    }
+                    return false;
+                  },
+                  child: ScrollablePositionedList.builder(
+                    itemScrollController: _scrollController,
+                    itemCount: _lines.length,
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 140,
+                      horizontal: 24,
+                    ),
+                    itemBuilder: (context, index) => _LyricRow(
+                      line: _lines[index],
+                      isCurrent: index == _currentIndex,
+                    ),
+                  ),
+                ),
+        ),
       ),
     );
   }
@@ -361,19 +469,24 @@ class _LyricRow extends StatelessWidget {
         children: [
           Text(
             line.original,
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.white70,
-              fontSize: 15,
+              fontSize: isCurrent ? 18 : 15,
+              fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
             ),
           ),
+          // The 독음 tier is the one that actually carries the current line's emphasis — the
+          // other two still grow a little so the current line reads clearly, but stay smaller
+          // than the phonetic reading rather than competing with it for attention.
           if (line.phonetic != null) ...[
             const SizedBox(height: 2),
             Text(
               line.phonetic!,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white70,
-                fontSize: 13,
+                fontSize: isCurrent ? 20 : 13,
                 fontStyle: FontStyle.italic,
+                fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
               ),
             ),
           ],
@@ -383,8 +496,8 @@ class _LyricRow extends StatelessWidget {
               line.translation!,
               style: TextStyle(
                 color: Colors.white70,
-                fontSize: isCurrent ? 24 : 18,
-                fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
+                fontSize: isCurrent ? 19 : 18,
+                fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
               ),
             ),
           ],
@@ -408,7 +521,8 @@ class _MarqueeText extends StatefulWidget {
   State<_MarqueeText> createState() => _MarqueeTextState();
 }
 
-class _MarqueeTextState extends State<_MarqueeText> with SingleTickerProviderStateMixin {
+class _MarqueeTextState extends State<_MarqueeText>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _progress;
 
@@ -421,8 +535,10 @@ class _MarqueeTextState extends State<_MarqueeText> with SingleTickerProviderSta
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 12))
-      ..repeat();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 12),
+    )..repeat();
     _progress = CurvedAnimation(
       parent: _controller,
       curve: const Interval(_holdStart, _holdEnd, curve: Curves.easeInOut),
@@ -459,7 +575,10 @@ class _MarqueeTextState extends State<_MarqueeText> with SingleTickerProviderSta
       textDirection: TextDirection.ltr,
       maxLines: 1,
     )..layout();
-    final overflow = (painter.width - availableWidth).clamp(0.0, double.infinity);
+    final overflow = (painter.width - availableWidth).clamp(
+      0.0,
+      double.infinity,
+    );
     return SizedBox(
       width: availableWidth,
       child: ClipRect(

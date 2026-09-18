@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
+import 'package:sing_along/data/hive/hive_bootstrap.dart';
 import 'package:sing_along/data/hive/models/cached_lyric_line.dart';
 import 'package:sing_along/data/hive/models/cached_lyrics_entry.dart';
+import 'package:sing_along/data/hive/models/recent_song_entry.dart';
 import 'package:sing_along/main.dart';
 
 void main() {
@@ -21,6 +23,7 @@ void main() {
     Hive.init(tempDir.path);
     Hive.registerAdapter(CachedLyricsEntryAdapter());
     Hive.registerAdapter(CachedLyricLineAdapter());
+    Hive.registerAdapter(RecentSongEntryAdapter());
   });
 
   setUp(() {
@@ -57,8 +60,9 @@ void main() {
   });
 
   testWidgets('Home page renders permission onboarding', (WidgetTester tester) async {
-    final box = await Hive.openBox<CachedLyricsEntry>('widget_test_lyrics_cache');
-    await tester.pumpWidget(SingAlongApp(lyricsBox: box));
+    final lyricsBox = await Hive.openBox<CachedLyricsEntry>('widget_test_lyrics_cache');
+    final recentSongsBox = await Hive.openBox<RecentSongEntry>('widget_test_recent_songs');
+    await tester.pumpWidget(SingAlongApp(boxes: HiveBoxes(lyrics: lyricsBox, recentSongs: recentSongsBox)));
     await tester.pump();
 
     expect(find.text('sing-along'), findsOneWidget);

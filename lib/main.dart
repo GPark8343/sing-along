@@ -2,13 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
-import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'app/lyrics/full_screen_lyrics_page.dart';
+import 'app/lyrics/saved_lyrics_view_page.dart';
 import 'app/onboarding/permission_screen.dart';
 import 'core/platform/notification_bridge.dart';
+import 'core/text/title_normalizer.dart';
 import 'data/hive/hive_bootstrap.dart';
-import 'data/hive/models/cached_lyrics_entry.dart';
+import 'data/hive/models/recent_song_entry.dart';
 import 'data/repositories/lyrics_repository.dart';
 import 'song_detection/now_playing_model.dart';
 import 'song_detection/now_playing_watcher.dart';
@@ -24,29 +25,29 @@ part 'overlay_main.dart';
 void main() async {
   // Only the main engine ever touches Hive — see hive_bootstrap.dart.
   WidgetsFlutterBinding.ensureInitialized();
-  final lyricsBox = await initHive();
-  runApp(SingAlongApp(lyricsBox: lyricsBox));
+  final boxes = await initHive();
+  runApp(SingAlongApp(boxes: boxes));
 }
 
 class SingAlongApp extends StatelessWidget {
-  const SingAlongApp({super.key, required this.lyricsBox});
+  const SingAlongApp({super.key, required this.boxes});
 
-  final Box<CachedLyricsEntry> lyricsBox;
+  final HiveBoxes boxes;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'sing-along',
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple)),
-      home: HomePage(lyricsBox: lyricsBox),
+      home: HomePage(boxes: boxes),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.lyricsBox});
+  const HomePage({super.key, required this.boxes});
 
-  final Box<CachedLyricsEntry> lyricsBox;
+  final HiveBoxes boxes;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -56,9 +57,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   PermissionStatus _permissionStatus =
       const PermissionStatus(notificationAccessGranted: false, overlayGranted: false);
   bool _overlayActive = false;
+  // Starts true since the app is always launched into the foreground; kept in sync with
+  // AppLifecycleState.resumed (Navigator pushes within this same app, like the full-screen
+  // lyrics page, never change this — only actually leaving the app does).
+  bool _isAppVisible = true;
+  // trackKey the currently-held lyrics/cache actually correspond to — lets a catch-up fetch
+  // tell whether it's already up to date with what's playing before firing.
+  String? _fetchedTrackKey;
   NowPlaying? _nowPlaying;
   late final NowPlayingWatcher _watcher;
-  late final LyricsRepository _lyricsRepository = LyricsRepository(cacheBox: widget.lyricsBox);
+  late final LyricsRepository _lyricsRepository = LyricsRepository(cacheBox: widget.boxes.lyrics);
   StreamSubscription<NowPlaying?>? _positionSubscription;
   StreamSubscription<NowPlaying?>? _trackChangeSubscription;
   StreamSubscription<dynamic>? _overlayMessageSubscription;
@@ -66,6 +74,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? _lastLyricsPayload;
   List<LyricsLine> _currentLyrics = const [];
   bool _currentLyricsIsUserPasted = false;
+  // Manual override for a song whose LRC timestamps look right but feel wrong in practice (a
+  // slightly-off match, odd LRCLIB timing, etc.) — set from the full-screen page's sync icon,
+  // reset back to false whenever a genuinely new track starts fetching.
+  bool _syncDisabledByUser = false;
   bool _expandRequestInFlight = false;
   bool _toggleInFlight = false;
   Timer? _stopDebounceTimer;
@@ -155,14 +167,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() => _overlayActive = false);
       await NotificationBridge.bringToFront();
       if (mounted) {
-        await Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => FullScreenLyricsPage(
+        await Navigator.of(context).push(_fadeThroughRoute(
+          FullScreenLyricsPage(
             watcher: _watcher,
             lyricsRepository: _lyricsRepository,
             initialNowPlaying: _nowPlaying,
             initialLines: _currentLyrics,
             initialIsUserPasted: _currentLyricsIsUserPasted,
+            initialSyncDisabled: _syncDisabledByUser,
             onLyricsEdited: _applyLyricsResult,
+            onSyncToggled: _setSyncDisabled,
           ),
         ));
       }
@@ -201,6 +215,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     _stopDebounceTimer?.cancel();
+    // Neither the overlay nor the app's own screen is visible right now — there's nobody to
+    // show a fetch to, so skip the API calls and Hive cache write entirely rather than
+    // quietly accumulating data for songs the user never actually looked at. Whatever's
+    // playing when the overlay/app becomes visible again gets caught up then (see
+    // _catchUpLyricsIfNeeded), so nothing is permanently missed, just deferred.
+    if (!_shouldFetchLyrics) return;
+    await _fetchLyricsFor(nowPlaying);
+  }
+
+  bool get _shouldFetchLyrics => _overlayActive || _isAppVisible;
+
+  Future<void> _fetchLyricsFor(NowPlaying nowPlaying) async {
+    // Only ever called for a genuine track change (a fresh fetch, or a catch-up for a song
+    // that isn't the one currently held) — never for the same song re-displaying, so this is
+    // always the right place to drop a manual sync-off choice that belonged to the last song.
+    _syncDisabledByUser = false;
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
     // Marks this as the current track for as long as its fetch is running — if the song
     // changes again before it finishes (a fast skip, or several in a row), whichever fetch
@@ -226,8 +256,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
     );
     if (_latestRequestedTrackKey != requestedTrackKey) return; // superseded — drop this result
+    _fetchedTrackKey = requestedTrackKey;
     if (mounted) setState(() => _lyricsStatus = _statusFor(result));
     await _applyLyricsResult(nowPlaying, result);
+  }
+
+  // Called whenever the overlay or the app's own screen just became visible — if track
+  // changes were being skipped while neither was up, this fetches for whatever's actually
+  // playing right now instead of waiting for the *next* track change (which might be
+  // minutes away, or never, if the same song keeps playing).
+  Future<void> _catchUpLyricsIfNeeded() async {
+    final current = _nowPlaying;
+    if (current == null || current.trackKey == _fetchedTrackKey) return;
+    await _fetchLyricsFor(current);
   }
 
   // Pushes a lyrics result out to both this screen's own state and the overlay — shared by a
@@ -235,17 +276,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // by hand (a paste-in, or discarding one back to the API result), so the small overlay
   // reflects that edit immediately instead of sitting on whatever it had before.
   Future<void> _applyLyricsResult(NowPlaying nowPlaying, LyricsResult result) async {
+    // Also reached from the full-screen page's paste-in/refetch edits (not just a normal
+    // fetch) — marking the track as up to date either way stops a later catch-up fetch from
+    // clobbering a user's manual paste-in the next time the overlay/app becomes visible.
+    _fetchedTrackKey = nowPlaying.trackKey;
     if (mounted) {
       setState(() {
         _currentLyrics = result.found ? result.lines : const [];
         _currentLyricsIsUserPasted = result.isUserPasted;
       });
     }
+    if (result.found) await _recordRecentSong(nowPlaying);
     _lastLyricsPayload = {
       'type': 'lyrics',
       'found': result.found,
       'fromCache': result.fromCache,
       'isUserPasted': result.isUserPasted,
+      'syncDisabled': _syncDisabledByUser,
       'trackKey': nowPlaying.trackKey,
       'title': nowPlaying.title,
       'artist': nowPlaying.artist ?? '',
@@ -261,6 +308,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await FlutterOverlayWindow.shareData(_lastLyricsPayload);
   }
 
+  static const int _maxRecentSongs = 4;
+
+  // Keyed by the same cache key the lyrics box uses, so replaying a song updates its
+  // position in the list instead of adding a duplicate. Only title/artist are duplicated
+  // here — the actual lines are looked up from the lyrics box by key when the user opens one,
+  // so this stays small even with a long listening history.
+  Future<void> _recordRecentSong(NowPlaying nowPlaying) async {
+    final key = TitleNormalizer.cacheKey(nowPlaying.title, nowPlaying.artist ?? '');
+    await widget.boxes.recentSongs.put(
+      key,
+      RecentSongEntry(
+        title: nowPlaying.title,
+        artist: nowPlaying.artist ?? '',
+        cacheKey: key,
+        playedAt: DateTime.now(),
+      ),
+    );
+    final box = widget.boxes.recentSongs;
+    if (box.length > _maxRecentSongs) {
+      final sortedKeys = box.keys.toList()
+        ..sort((a, b) => box.get(b)!.playedAt.compareTo(box.get(a)!.playedAt));
+      final staleKeys = sortedKeys.skip(_maxRecentSongs);
+      await box.deleteAll(staleKeys);
+    }
+    if (mounted) setState(() {}); // recent-songs section reads straight from the box
+  }
+
+  List<RecentSongEntry> _recentSongsSorted() {
+    final entries = widget.boxes.recentSongs.values.toList()
+      ..sort((a, b) => b.playedAt.compareTo(a.playedAt));
+    return entries;
+  }
+
+  Future<void> _openSavedLyrics(RecentSongEntry entry) async {
+    final result = _lyricsRepository.getCachedByKey(entry.cacheKey);
+    if (!mounted || result == null) return;
+    await Navigator.of(context).push(_fadeThroughRoute(
+      SavedLyricsViewPage(title: entry.title, artist: entry.artist, lines: result.lines),
+    ));
+  }
+
+  // The full-screen page's sync icon is the only place this gets toggled — reversible any
+  // number of times for the current song, propagated here so the small overlay (which has no
+  // room for its own toggle) picks up the same choice.
+  Future<void> _setSyncDisabled(bool disabled) async {
+    if (_syncDisabledByUser == disabled) return;
+    _syncDisabledByUser = disabled;
+    final payload = _lastLyricsPayload;
+    if (payload == null) return;
+    _lastLyricsPayload = {...payload, 'syncDisabled': disabled};
+    await FlutterOverlayWindow.shareData(_lastLyricsPayload);
+  }
+
   String _statusFor(LyricsResult result) {
     final cacheSuffix = result.fromCache ? ' (캐시)' : '';
     if (!result.found) return '가사를 찾을 수 없음$cacheSuffix';
@@ -273,10 +373,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasVisible = _isAppVisible;
+    _isAppVisible = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.resumed) {
       // Both permissions are granted through a system Settings screen, not a runtime
       // dialog, so re-check status whenever the user comes back to the app.
       _refreshStatus();
+      if (!wasVisible) _catchUpLyricsIfNeeded();
     }
   }
 
@@ -344,6 +447,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         overlayTitle: 'sing-along',
         overlayContent: '가사 오버레이가 실행 중입니다',
       );
+      // The whole point of the overlay is floating on top of whatever app the user actually
+      // wants to be using — showing it and then leaving this app's own screen sitting in front
+      // of it would defeat that, so step out of the way back to wherever they were (matches
+      // the full-screen lyrics page's own back-button behavior). This backgrounds the
+      // Activity, not the process, so the resend below still runs normally.
+      await NotificationBridge.moveTaskToBack();
       // The overlay engine takes a moment to start and register its message
       // handler; resend whatever lyrics we already have once it's had time
       // to come up, since any earlier shareData call would have been missed.
@@ -361,6 +470,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           });
         }
       }
+      // The overlay just came up — if fetching had been paused while neither it nor the app
+      // screen was visible, catch up on whatever's playing right now.
+      await _catchUpLyricsIfNeeded();
     }
     await _refreshStatus();
   }
@@ -385,7 +497,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   await _refreshStatus();
                 },
               ),
-              const SizedBox(height: 24),
+              // Tighter when the permission section above is already collapsed to its compact
+              // granted-row form (the common case) than when it's still showing full cards.
+              SizedBox(height: _permissionStatus.allGranted ? 12 : 24),
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -416,10 +530,62 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   onPressed: _toggleInFlight ? null : _toggleOverlay,
                   child: Text(_overlayActive ? '오버레이 닫기' : '오버레이 표시'),
                 ),
+              ..._buildRecentSongsSection(context),
             ],
           ),
         ),
       ),
     );
   }
+
+  // Hidden entirely until there's at least one song to show — an empty "최근 들은 곡" card on
+  // first run would just be clutter with nothing useful in it.
+  List<Widget> _buildRecentSongsSection(BuildContext context) {
+    final recent = _recentSongsSorted();
+    if (recent.isEmpty) return const [];
+    return [
+      const SizedBox(height: 24),
+      Text('최근 들은 곡', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      Card(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final entry in recent)
+              ListTile(
+                title: Text(entry.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: entry.artist.isEmpty
+                    ? null
+                    : Text(entry.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _openSavedLyrics(entry),
+              ),
+          ],
+        ),
+      ),
+    ];
+  }
+}
+
+// A gentle cross-fade + scale instead of the default MaterialPageRoute slide-from-right —
+// the overlay and the full-screen page are separate Android windows (a system overlay vs.
+// this Activity), so there's no way to visually morph one into the other, but a fade reads
+// as a much softer handoff than a sharp directional slide. Navigator animates this the same
+// way in reverse on pop, so going back to the compact overlay gets the same treatment.
+PageRoute<T> _fadeThroughRoute<T>(Widget page) {
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 280),
+    reverseTransitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (context, animation, secondaryAnimation) => page,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.97, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
 }

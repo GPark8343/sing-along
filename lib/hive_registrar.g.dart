@@ -5,11 +5,13 @@
 import 'package:hive_ce/hive_ce.dart';
 import 'package:sing_along/data/hive/models/cached_lyric_line.dart';
 import 'package:sing_along/data/hive/models/cached_lyrics_entry.dart';
+import 'package:sing_along/data/hive/models/recent_song_entry.dart';
 
 extension HiveRegistrar on HiveInterface {
   void registerAdapters() {
     registerAdapter(CachedLyricLineAdapter());
     registerAdapter(CachedLyricsEntryAdapter());
+    registerAdapter(RecentSongEntryAdapter());
   }
 }
 
@@ -17,5 +19,6 @@ extension IsolatedHiveRegistrar on IsolatedHiveInterface {
   void registerAdapters() {
     registerAdapter(CachedLyricLineAdapter());
     registerAdapter(CachedLyricsEntryAdapter());
+    registerAdapter(RecentSongEntryAdapter());
   }
 }
