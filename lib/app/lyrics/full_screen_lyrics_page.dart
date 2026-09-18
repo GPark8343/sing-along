@@ -7,6 +7,7 @@ import '../../core/platform/notification_bridge.dart';
 import '../../data/repositories/lyrics_repository.dart';
 import '../../song_detection/now_playing_model.dart';
 import '../../song_detection/now_playing_watcher.dart';
+import '../theme/metal_theme.dart';
 
 /// Full-screen lyrics view (YouTube-Music-style: a scrolling list of every line, current line
 /// bold/bright, the rest dimmed) — opened from the floating overlay's expand button when the
@@ -73,6 +74,14 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   bool get _hasSyncData =>
       _lines.isNotEmpty && _lines.first.timestampMs != null;
   bool get _isSynced => _hasSyncData && !_syncManuallyDisabled;
+
+  // Mirrors exactly which icons the AppBar's `actions` below actually renders, so the title
+  // marquee's width calculation (which can't rely on AppBar handing it a bounded constraint
+  // — see _MarqueeText's own comment) stays accurate instead of assuming a fixed icon count.
+  int get _appBarActionCount {
+    if (_lines.isEmpty || _showPasteForm) return 0;
+    return 2 + (_isUserPasted ? 1 : 0); // sync/tooltip + edit, plus refresh when pasted
+  }
 
   @override
   void initState() {
@@ -272,14 +281,20 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
         NotificationBridge.moveTaskToBack();
       },
       child: Scaffold(
-        backgroundColor: Colors.black,
+        backgroundColor: MetalTheme.base,
         appBar: AppBar(
-          backgroundColor: Colors.black,
+          backgroundColor: MetalTheme.base,
           foregroundColor: Colors.white,
           elevation: 0,
           title: _MarqueeText(
             text: _titleAndArtist(),
             style: const TextStyle(color: Colors.white, fontSize: 18),
+            // Was a flat magic number sized for exactly 2 action icons — stopped matching
+            // reality (clipping the right edge of long titles) once a 3rd (refresh) icon could
+            // show up too. Counting whatever's actually in `actions` below keeps this accurate
+            // regardless of how many end up there. 56 ~= the back button, 48 per icon button,
+            // 20 ~= AppBar's own title padding.
+            reservedWidth: 56 + _appBarActionCount * 48 + 20,
           ),
           actions: [
             if (_lines.isNotEmpty && !_showPasteForm) ...[
@@ -333,53 +348,62 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
         ),
         // The AppBar already accounts for the top inset, so only the bottom (system navigation
         // bar) needs guarding here.
-        body: SafeArea(
-          top: false,
-          child: _loadingLyrics
-              ? const Center(
-                  child: Text(
-                    '가사 불러오는 중...',
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                )
-              : (_lines.isEmpty || _showPasteForm)
-              ? _PasteLyricsForm(
-                  controller: _pasteController,
-                  saving: _savingPastedLyrics,
-                  onSave: _savePastedLyrics,
-                  // Only offer a way out without saving when there's something to go back
-                  // to — the auto-opened not-found form has nothing behind it to cancel to.
-                  onCancel: _lines.isNotEmpty
-                      ? () => setState(() => _showPasteForm = false)
-                      : null,
-                )
-              : NotificationListener<ScrollNotification>(
-                  // dragDetails is only non-null for a real finger-driven drag — our own
-                  // scrollTo() below animates the list too and fires these same
-                  // notifications, but never with dragDetails, so this can't mistake its
-                  // own programmatic scroll for the user grabbing the list.
-                  onNotification: (notification) {
-                    if (notification is ScrollStartNotification &&
-                        notification.dragDetails != null) {
-                      _userDragging = true;
-                    } else if (notification is ScrollEndNotification) {
-                      _userDragging = false;
-                    }
-                    return false;
-                  },
-                  child: ScrollablePositionedList.builder(
-                    itemScrollController: _scrollController,
-                    itemCount: _lines.length,
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 140,
-                      horizontal: 24,
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: MetalTheme.backgroundGradient,
+          ),
+          child: SafeArea(
+            top: false,
+            child: _loadingLyrics
+                ? const Center(
+                    child: Text(
+                      '가사 불러오는 중...',
+                      style: TextStyle(color: Colors.white54),
                     ),
-                    itemBuilder: (context, index) => _LyricRow(
-                      line: _lines[index],
-                      isCurrent: index == _currentIndex,
+                  )
+                : (_lines.isEmpty || _showPasteForm)
+                ? _PasteLyricsForm(
+                    controller: _pasteController,
+                    saving: _savingPastedLyrics,
+                    onSave: _savePastedLyrics,
+                    // Only offer a way out without saving when there's something to go back
+                    // to — the auto-opened not-found form has nothing behind it to cancel to.
+                    onCancel: _lines.isNotEmpty
+                        ? () => setState(() => _showPasteForm = false)
+                        : null,
+                  )
+                : NotificationListener<ScrollNotification>(
+                    // dragDetails is only non-null for a real finger-driven drag — our own
+                    // scrollTo() below animates the list too and fires these same
+                    // notifications, but never with dragDetails, so this can't mistake its
+                    // own programmatic scroll for the user grabbing the list.
+                    onNotification: (notification) {
+                      if (notification is ScrollStartNotification &&
+                          notification.dragDetails != null) {
+                        _userDragging = true;
+                      } else if (notification is ScrollEndNotification) {
+                        _userDragging = false;
+                      }
+                      return false;
+                    },
+                    child: ScrollablePositionedList.builder(
+                      itemScrollController: _scrollController,
+                      itemCount: _lines.length,
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 140,
+                        horizontal: 24,
+                      ),
+                      // Without sync data _currentIndex isn't tracking playback at all — it's
+                      // just wherever it last happened to be (usually 0) — so highlighting it as
+                      // "current" would be highlighting a meaningless line rather than the one
+                      // actually being sung.
+                      itemBuilder: (context, index) => _LyricRow(
+                        line: _lines[index],
+                        isCurrent: _isSynced && index == _currentIndex,
+                      ),
                     ),
                   ),
-                ),
+          ),
         ),
       ),
     );
@@ -429,17 +453,21 @@ class _PasteLyricsForm extends StatelessWidget {
               hintText: '가사를 여기에 붙여넣으세요',
               hintStyle: const TextStyle(color: Colors.white24),
               filled: true,
-              fillColor: Colors.white10,
+              fillColor: MetalTheme.surfaceDark,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide.none,
+                borderSide: const BorderSide(
+                  color: MetalTheme.edgeHighlight,
+                  width: 0.6,
+                ),
               ),
             ),
           ),
           const SizedBox(height: 16),
-          ElevatedButton(
+          MetalButton(
+            label: saving ? '저장 중...' : '저장',
+            icon: Icons.save_outlined,
             onPressed: saving ? null : onSave,
-            child: Text(saving ? '저장 중...' : '저장'),
           ),
           if (onCancel != null) ...[
             const SizedBox(height: 8),
@@ -484,7 +512,7 @@ class _LyricRow extends StatelessWidget {
               line.phonetic!,
               style: TextStyle(
                 color: Colors.white70,
-                fontSize: isCurrent ? 20 : 13,
+                fontSize: isCurrent ? 17 : 13,
                 fontStyle: FontStyle.italic,
                 fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
               ),
@@ -512,10 +540,18 @@ class _LyricRow extends StatelessWidget {
 /// a long title+artist string is common enough in the AppBar to be worth handling, but most
 /// are short enough that animating them would just be motion for no reason.
 class _MarqueeText extends StatefulWidget {
-  const _MarqueeText({required this.text, required this.style});
+  const _MarqueeText({
+    required this.text,
+    required this.style,
+    required this.reservedWidth,
+  });
 
   final String text;
   final TextStyle style;
+  // How much of the screen width to net out for everything else in the AppBar (back button,
+  // action icons, padding) — passed in by the caller since only it knows how many action
+  // icons are actually showing right now.
+  final double reservedWidth;
 
   @override
   State<_MarqueeText> createState() => _MarqueeTextState();
@@ -567,9 +603,9 @@ class _MarqueeTextState extends State<_MarqueeText>
     // through as infinite depending on how leading/actions lay out — which made the overflow
     // check below always read "fits" and fall back to a static, ellipsized Text no matter how
     // long the title actually was. Computing the available width ourselves from the screen
-    // size (roughly netting out the back button and the sync icon on the right) sidesteps
-    // that instead of depending on it.
-    final availableWidth = MediaQuery.of(context).size.width - 172;
+    // size (netting out however much room the caller says the rest of the AppBar needs right
+    // now) sidesteps that instead of depending on it.
+    final availableWidth = MediaQuery.of(context).size.width - widget.reservedWidth;
     final painter = TextPainter(
       text: TextSpan(text: widget.text, style: widget.style),
       textDirection: TextDirection.ltr,

@@ -6,6 +6,7 @@ import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'app/lyrics/full_screen_lyrics_page.dart';
 import 'app/lyrics/saved_lyrics_view_page.dart';
 import 'app/onboarding/permission_screen.dart';
+import 'app/theme/metal_theme.dart';
 import 'core/platform/notification_bridge.dart';
 import 'core/text/title_normalizer.dart';
 import 'data/hive/hive_bootstrap.dart';
@@ -38,7 +39,7 @@ class SingAlongApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'sing-along',
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple)),
+      theme: MetalTheme.themeData(),
       home: HomePage(boxes: boxes),
     );
   }
@@ -54,8 +55,10 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  PermissionStatus _permissionStatus =
-      const PermissionStatus(notificationAccessGranted: false, overlayGranted: false);
+  PermissionStatus _permissionStatus = const PermissionStatus(
+    notificationAccessGranted: false,
+    overlayGranted: false,
+  );
   bool _overlayActive = false;
   // Starts true since the app is always launched into the foreground; kept in sync with
   // AppLifecycleState.resumed (Navigator pushes within this same app, like the full-screen
@@ -66,7 +69,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _fetchedTrackKey;
   NowPlaying? _nowPlaying;
   late final NowPlayingWatcher _watcher;
-  late final LyricsRepository _lyricsRepository = LyricsRepository(cacheBox: widget.boxes.lyrics);
+  late final LyricsRepository _lyricsRepository = LyricsRepository(
+    cacheBox: widget.boxes.lyrics,
+  );
   StreamSubscription<NowPlaying?>? _positionSubscription;
   StreamSubscription<NowPlaying?>? _trackChangeSubscription;
   StreamSubscription<dynamic>? _overlayMessageSubscription;
@@ -91,7 +96,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _watcher = NowPlayingWatcher();
-    _overlayMessageSubscription = FlutterOverlayWindow.overlayListener.listen((event) {
+    _overlayMessageSubscription = FlutterOverlayWindow.overlayListener.listen((
+      event,
+    ) {
       if (event is! Map) return;
       switch (event['type']) {
         case 'expand':
@@ -167,18 +174,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() => _overlayActive = false);
       await NotificationBridge.bringToFront();
       if (mounted) {
-        await Navigator.of(context).push(_fadeThroughRoute(
-          FullScreenLyricsPage(
-            watcher: _watcher,
-            lyricsRepository: _lyricsRepository,
-            initialNowPlaying: _nowPlaying,
-            initialLines: _currentLyrics,
-            initialIsUserPasted: _currentLyricsIsUserPasted,
-            initialSyncDisabled: _syncDisabledByUser,
-            onLyricsEdited: _applyLyricsResult,
-            onSyncToggled: _setSyncDisabled,
+        await Navigator.of(context).push(
+          _fadeThroughRoute(
+            FullScreenLyricsPage(
+              watcher: _watcher,
+              lyricsRepository: _lyricsRepository,
+              initialNowPlaying: _nowPlaying,
+              initialLines: _currentLyrics,
+              initialIsUserPasted: _currentLyricsIsUserPasted,
+              initialSyncDisabled: _syncDisabledByUser,
+              onLyricsEdited: _applyLyricsResult,
+              onSyncToggled: _setSyncDisabled,
+            ),
           ),
-        ));
+        );
       }
     } finally {
       // Guaranteed to clear even if bringToFront/closeOverlay/the route throws — otherwise a
@@ -209,7 +218,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _currentLyrics = const [];
           _currentLyricsIsUserPasted = false;
         });
-        _lastLyricsPayload = {'type': 'lyrics', 'found': false, 'title': '', 'artist': ''};
+        _lastLyricsPayload = {
+          'type': 'lyrics',
+          'found': false,
+          'title': '',
+          'artist': '',
+        };
         FlutterOverlayWindow.shareData(_lastLyricsPayload);
       });
       return;
@@ -253,9 +267,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final result = await _lyricsRepository.getLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
-      durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
+      durationSeconds: nowPlaying.durationMs > 0
+          ? (nowPlaying.durationMs / 1000).round()
+          : null,
     );
-    if (_latestRequestedTrackKey != requestedTrackKey) return; // superseded — drop this result
+    if (_latestRequestedTrackKey != requestedTrackKey) {
+      return; // superseded — drop this result
+    }
     _fetchedTrackKey = requestedTrackKey;
     if (mounted) setState(() => _lyricsStatus = _statusFor(result));
     await _applyLyricsResult(nowPlaying, result);
@@ -275,7 +293,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // normal track-change fetch and by the full-screen page editing the current song's lyrics
   // by hand (a paste-in, or discarding one back to the API result), so the small overlay
   // reflects that edit immediately instead of sitting on whatever it had before.
-  Future<void> _applyLyricsResult(NowPlaying nowPlaying, LyricsResult result) async {
+  Future<void> _applyLyricsResult(
+    NowPlaying nowPlaying,
+    LyricsResult result,
+  ) async {
     // Also reached from the full-screen page's paste-in/refetch edits (not just a normal
     // fetch) — marking the track as up to date either way stops a later catch-up fetch from
     // clobbering a user's manual paste-in the next time the overlay/app becomes visible.
@@ -299,7 +320,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       'durationMs': nowPlaying.durationMs,
       'lines': [
         for (final line in result.lines)
-          {'t': line.timestampMs, 'o': line.original, 'p': line.phonetic, 'tr': line.translation},
+          {
+            't': line.timestampMs,
+            'o': line.original,
+            'p': line.phonetic,
+            'tr': line.translation,
+          },
       ],
     };
     // shareData only reaches a listener that's alive *right now* — if the
@@ -315,7 +341,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // here — the actual lines are looked up from the lyrics box by key when the user opens one,
   // so this stays small even with a long listening history.
   Future<void> _recordRecentSong(NowPlaying nowPlaying) async {
-    final key = TitleNormalizer.cacheKey(nowPlaying.title, nowPlaying.artist ?? '');
+    final key = TitleNormalizer.cacheKey(
+      nowPlaying.title,
+      nowPlaying.artist ?? '',
+    );
     await widget.boxes.recentSongs.put(
       key,
       RecentSongEntry(
@@ -332,7 +361,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final staleKeys = sortedKeys.skip(_maxRecentSongs);
       await box.deleteAll(staleKeys);
     }
-    if (mounted) setState(() {}); // recent-songs section reads straight from the box
+    if (mounted) {
+      setState(() {}); // recent-songs section reads straight from the box
+    }
   }
 
   List<RecentSongEntry> _recentSongsSorted() {
@@ -344,9 +375,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _openSavedLyrics(RecentSongEntry entry) async {
     final result = _lyricsRepository.getCachedByKey(entry.cacheKey);
     if (!mounted || result == null) return;
-    await Navigator.of(context).push(_fadeThroughRoute(
-      SavedLyricsViewPage(title: entry.title, artist: entry.artist, lines: result.lines),
-    ));
+    await Navigator.of(context).push(
+      _fadeThroughRoute(
+        SavedLyricsViewPage(
+          title: entry.title,
+          artist: entry.artist,
+          lines: result.lines,
+        ),
+      ),
+    );
   }
 
   // The full-screen page's sync icon is the only place this gets toggled — reversible any
@@ -362,7 +399,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   String _statusFor(LyricsResult result) {
-    final cacheSuffix = result.fromCache ? ' (캐시)' : '';
+    final cacheSuffix = result.fromCache ? ' (저장됨)' : '';
     if (!result.found) return '가사를 찾을 수 없음$cacheSuffix';
     final hasPhonetic = result.lines.any((line) => line.phonetic != null);
     final hasTranslation = result.lines.any((line) => line.translation != null);
@@ -417,16 +454,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_overlayActive) {
       await FlutterOverlayWindow.closeOverlay();
     } else {
-      // showOverlay()'s `height` is consumed as raw physical pixels (unlike
-      // the plugin's resizeOverlay(), which runs it through a dp->px
-      // conversion), so it has to be scaled by the device's actual pixel
-      // ratio to land on a sane logical size. This must stay in sync with
-      // OverlayRoot's _maxCardHeight (230dp, sized for a 2-line lyric —
-      // see its doc comment) plus ~60dp for SafeArea's status-bar inset.
-      // Read the ratio before any `await` so it isn't a stale BuildContext
-      // read.
-      final devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
-      final overlayHeightPx = (290 * devicePixelRatio).round();
+      // showOverlay()'s `height` is consumed as raw physical pixels (unlike the plugin's
+      // resizeOverlay(), which runs it through a dp->px conversion), so it has to be scaled by
+      // the device's actual pixel ratio to land on a sane logical size. Sized as a share of
+      // this device's own screen height (via _OverlayRootState.windowHeightScreenRatio — both
+      // files are part of the same library) rather than a fixed dp number, so the overlay
+      // takes up roughly the same proportion of the screen on a compact phone as it does on a
+      // large one, instead of reading relatively bigger on a small screen and relatively tiny
+      // on a big one. Read both before any `await` so neither is a stale BuildContext read.
+      final mediaQuery = MediaQuery.of(context);
+      final devicePixelRatio = mediaQuery.devicePixelRatio;
+      final windowHeightDp =
+          mediaQuery.size.height * _OverlayRootState.windowHeightScreenRatio;
+      final overlayHeightPx = (windowHeightDp * devicePixelRatio).round();
       // OverlayService self-destructs shortly after creating its window if
       // showOverlay() is called while an instance is already alive natively
       // (e.g. one that survived a force-stop on some OEM skins) — always
@@ -480,58 +520,127 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('sing-along')),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              PermissionOnboarding(
-                status: _permissionStatus,
-                onRequestNotificationAccess: () async {
-                  await NotificationBridge.openNotificationListenerSettings();
-                },
-                onRequestOverlayPermission: () async {
-                  await FlutterOverlayWindow.requestPermission();
-                  await _refreshStatus();
-                },
+      appBar: AppBar(
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.graphic_eq, size: 22, color: MetalTheme.steelBright),
+            const SizedBox(width: 8),
+            // A flat title read plain against the same gradient every other screen already
+            // has — a brushed-chrome shine across the letters (light -> bright -> light)
+            // reads as a wordmark instead of a label, matching the rest of the metal look.
+            ShaderMask(
+              shaderCallback: (bounds) => const LinearGradient(
+                colors: [
+                  MetalTheme.steelBright,
+                  MetalTheme.textPrimary,
+                  MetalTheme.steel,
+                ],
+                stops: [0.0, 0.55, 1.0],
+              ).createShader(bounds),
+              child: const Text(
+                'sing-along',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  letterSpacing: 1.4,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
-              // Tighter when the permission section above is already collapsed to its compact
-              // granted-row form (the common case) than when it's still showing full cards.
-              SizedBox(height: _permissionStatus.allGranted ? 12 : 24),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
+            ),
+          ],
+        ),
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: MetalTheme.backgroundGradient,
+        ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                PermissionOnboarding(
+                  status: _permissionStatus,
+                  onRequestNotificationAccess: () async {
+                    await NotificationBridge.openNotificationListenerSettings();
+                  },
+                  onRequestOverlayPermission: () async {
+                    await FlutterOverlayWindow.requestPermission();
+                    await _refreshStatus();
+                  },
+                ),
+                // Tighter when the permission section above is already collapsed to its
+                // compact granted-row form (the common case) than when it's still showing full
+                // cards.
+                SizedBox(height: _permissionStatus.allGranted ? 12 : 24),
+                MetalCard(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('현재 재생 중', style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.graphic_eq,
+                            size: 18,
+                            color: MetalTheme.steel,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '현재 재생 중',
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(letterSpacing: 0.3),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
                       if (_nowPlaying == null)
-                        const Text('감지된 곡이 없습니다 — 다른 앱에서 음악을 재생해보세요')
+                        const Text(
+                          '감지된 곡이 없습니다 — 다른 앱에서 음악을 재생해보세요',
+                          style: TextStyle(color: MetalTheme.textSecondary),
+                        )
                       else ...[
-                        Text(_nowPlaying!.title, style: Theme.of(context).textTheme.bodyLarge),
-                        Text(_nowPlaying!.artist ?? ''),
-                        Text('${(_nowPlaying!.positionMs / 1000).toStringAsFixed(0)}s / '
-                            '${(_nowPlaying!.durationMs / 1000).toStringAsFixed(0)}s'),
+                        Text(
+                          _nowPlaying!.title,
+                          style: Theme.of(context).textTheme.bodyLarge
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                        Text(
+                          _nowPlaying!.artist ?? '',
+                          style: const TextStyle(
+                            color: MetalTheme.textSecondary,
+                          ),
+                        ),
+                        Text(
+                          '${(_nowPlaying!.positionMs / 1000).toStringAsFixed(0)}s / '
+                          '${(_nowPlaying!.durationMs / 1000).toStringAsFixed(0)}s',
+                          style: const TextStyle(color: MetalTheme.textMuted),
+                        ),
                         if (_lyricsStatus.isNotEmpty) ...[
                           const SizedBox(height: 4),
-                          Text(_lyricsStatus, style: Theme.of(context).textTheme.bodySmall),
+                          Text(
+                            _lyricsStatus,
+                            style: const TextStyle(
+                              color: MetalTheme.steelBright,
+                              fontSize: 12,
+                            ),
+                          ),
                         ],
                       ],
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 24),
-              if (_permissionStatus.overlayGranted)
-                ElevatedButton(
-                  onPressed: _toggleInFlight ? null : _toggleOverlay,
-                  child: Text(_overlayActive ? '오버레이 닫기' : '오버레이 표시'),
-                ),
-              ..._buildRecentSongsSection(context),
-            ],
+                const SizedBox(height: 24),
+                if (_permissionStatus.overlayGranted)
+                  MetalButton(
+                    icon: _overlayActive ? Icons.close : Icons.lyrics_outlined,
+                    label: _overlayActive ? '가사 닫기' : '가사 표시',
+                    onPressed: _toggleInFlight ? null : _toggleOverlay,
+                  ),
+                ..._buildRecentSongsSection(context),
+              ],
+            ),
           ),
         ),
       ),
@@ -545,19 +654,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (recent.isEmpty) return const [];
     return [
       const SizedBox(height: 24),
-      Text('최근 들은 곡', style: Theme.of(context).textTheme.titleMedium),
+      Row(
+        children: [
+          const Icon(Icons.history, size: 18, color: MetalTheme.steel),
+          const SizedBox(width: 8),
+          Text(
+            '최근 들은 곡',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(letterSpacing: 0.3),
+          ),
+        ],
+      ),
       const SizedBox(height: 8),
-      Card(
+      MetalCard(
+        padding: EdgeInsets.zero,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             for (final entry in recent)
               ListTile(
-                title: Text(entry.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                title: Text(
+                  entry.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 subtitle: entry.artist.isEmpty
                     ? null
-                    : Text(entry.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
-                trailing: const Icon(Icons.chevron_right),
+                    : Text(
+                        entry.artist,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: MetalTheme.textSecondary),
+                      ),
+                trailing: const Icon(
+                  Icons.chevron_right,
+                  color: MetalTheme.steel,
+                ),
                 onTap: () => _openSavedLyrics(entry),
               ),
           ],
@@ -578,7 +711,11 @@ PageRoute<T> _fadeThroughRoute<T>(Widget page) {
     reverseTransitionDuration: const Duration(milliseconds: 220),
     pageBuilder: (context, animation, secondaryAnimation) => page,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
-      final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
       return FadeTransition(
         opacity: curved,
         child: ScaleTransition(

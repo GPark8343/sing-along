@@ -25,7 +25,8 @@ class OverlayApp extends StatelessWidget {
 class _LyricLine {
   final int? timestampMs; // null when this song has no LRC sync data
   final String original;
-  final String? phonetic; // Japanese songs only — computed on-device, no key needed
+  final String?
+  phonetic; // Japanese songs only — computed on-device, no key needed
   final String? translation; // once a DeepL key is configured
 
   const _LyricLine({
@@ -44,14 +45,27 @@ class OverlayRoot extends StatefulWidget {
 }
 
 class _OverlayRootState extends State<OverlayRoot> {
-  // Fixed to comfortably fit the common case — every tier (원문/독음/번역) two
-  // lines deep — rather than either a single-line-tight budget (clips
-  // often) or a many-line-generous one (a bigger dead zone below the card
-  // blocks taps to whatever app is underneath; Android intercepts touches
-  // for the window's entire rectangle, not just its opaque pixels). A
-  // genuinely longer line still degrades gracefully via the scroll fallback
-  // below instead of being clipped outright.
-  static const double _maxCardHeight = 230;
+  // A plain dp number is the same *physical* size on every device (that's what dp already
+  // normalizes for), but not the same size *relative to the screen* — a phone with a small
+  // display would end up with a proportionally huge card, a tablet with a proportionally
+  // tiny one. windowHeightScreenRatio (read from main.dart, applied against that device's own
+  // MediaQuery.size.height) fixes that by sizing the window as a share of the actual screen
+  // instead of an absolute number. Everything below it is, in turn, a share of *that* window
+  // (via the LayoutBuilder in build() below) rather than more absolute numbers — so however
+  // tall the window ends up on a given device, the top bar/lyrics/progress row split it in
+  // these exact proportions, always summing to the same total with nothing left over.
+  static const double windowHeightScreenRatio = 0.29;
+  static const double _topBarRatio = 0.30;
+  static const double _lyricsAreaRatio = 0.55;
+  static const double _progressRowRatio = 0.15;
+  // Font sizes as a share of cardHeight too, for the same reason the layout above is ratio-
+  // based — a plain pt number doesn't grow with a bigger card on a bigger screen, so short
+  // lyrics (the ones FittedBox never needs to shrink) would read smaller than they should
+  // relative to the card around them on a device with more room to work with.
+  static const double _originalFontRatio = 0.116;
+  static const double _phoneticFontRatio = 0.093;
+  static const double _translationFontRatio = 0.087;
+  static const double _placeholderFontRatio = 0.082;
 
   StreamSubscription<dynamic>? _messageSubscription;
   List<_LyricLine> _lines = const [];
@@ -148,7 +162,9 @@ class _OverlayRootState extends State<OverlayRoot> {
     if (event['trackKey'] != _trackKey) return;
     setState(() {
       final rawPositionMs = event['positionMs'] as int?;
-      _positionMs = rawPositionMs == null ? null : rawPositionMs + _relayDelayMs(event);
+      _positionMs = rawPositionMs == null
+          ? null
+          : rawPositionMs + _relayDelayMs(event);
       _durationMs = (event['durationMs'] as int?) ?? _durationMs;
       _recomputeCurrentIndex();
     });
@@ -167,9 +183,10 @@ class _OverlayRootState extends State<OverlayRoot> {
     return delay > 0 ? delay : 0; // guard against clock weirdness, never rewind
   }
 
-
   bool get _isSynced =>
-      _lines.isNotEmpty && _lines.first.timestampMs != null && !_syncDisabledByUser;
+      _lines.isNotEmpty &&
+      _lines.first.timestampMs != null &&
+      !_syncDisabledByUser;
 
   void _recomputeCurrentIndex() {
     if (!_isSynced || _positionMs == null) return;
@@ -182,16 +199,6 @@ class _OverlayRootState extends State<OverlayRoot> {
       }
     }
     _currentIndex = index;
-  }
-
-  void _advanceLine(int delta) {
-    if (_isSynced || _lines.isEmpty) return;
-    // Clamped, not wrapped — tapping left on the first line or right on the last does
-    // nothing, rather than looping around to the other end, which reads as a bug ("why did
-    // it jump to the end?") more than a feature.
-    final next = (_currentIndex + delta).clamp(0, _lines.length - 1);
-    if (next == _currentIndex) return;
-    setState(() => _currentIndex = next);
   }
 
   void _requestExpand() {
@@ -210,10 +217,11 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   @override
   Widget build(BuildContext context) {
-    // User-pasted lyrics are never rendered in this small card — there's no room here to
-    // offer the paste UI itself, so this just points the user at the full-screen page instead
-    // of trying (and failing) to usefully cram hand-entered text into this space.
-    final currentLine = (_lines.isEmpty || _isUserPasted)
+    // Anything that isn't actually synced — user-pasted text, a plain unsynced LRCLIB match,
+    // or sync manually turned off from the full-screen page — has no reliable "current line"
+    // to show here: this card has no room for manual left/right navigation UI, so it just
+    // points the user at the full-screen page instead.
+    final currentLine = (_lines.isEmpty || !_isSynced)
         ? null
         : _lines[_currentIndex.clamp(0, _lines.length - 1)];
     final progress =
@@ -224,228 +232,274 @@ class _OverlayRootState extends State<OverlayRoot> {
     return Material(
       color: Colors.transparent,
       child: SafeArea(
-        // Align + a full-width SizedBox split the two axes: full window
-        // width (so the card still spans edge to edge) but only as much
-        // height as the content actually needs (Align hands its child loose
-        // constraints, so the mainAxisSize.min Column below isn't forced to
-        // stretch to the window's full — fixed, oversized — height).
+        // Align + a full-width SizedBox split the two axes: full window width (so the card
+        // still spans edge to edge) but a fixed, content-independent height — every section
+        // below (top bar, lyrics area, progress row) has a fixed height of its own now, so
+        // the card's total height always matches the native window's, with no leftover
+        // transparent gap between the card and the window's bottom edge.
         child: Align(
           alignment: Alignment.topCenter,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: SizedBox(
               width: double.infinity,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.82),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      // 44dp keeps both buttons close to Android's 48dp minimum comfortable
-                      // touch-target guidance — 32dp (matching the old icon-only visual size)
-                      // measured out as too small to reliably hit on a small floating card.
-                      height: 44,
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 12),
-                          const Icon(
-                            Icons.drag_handle,
-                            color: Colors.white38,
-                            size: 18,
-                          ),
-                          if (_fromCache && _lines.isNotEmpty) ...[
-                            const SizedBox(width: 8),
-                            const Icon(
-                              Icons.bolt,
-                              color: Colors.amberAccent,
-                              size: 14,
-                            ),
-                            const SizedBox(width: 2),
-                            const Text(
-                              '캐시',
-                              style: TextStyle(color: Colors.white38, fontSize: 11),
-                            ),
-                          ],
-                          if (_lines.isNotEmpty) ...[
-                            const SizedBox(width: 8),
-                            Tooltip(
-                              message: _isSynced
-                                  ? '싱크됨 — 자동으로 넘어감'
-                                  : '싱크 없음 — 좌우 탭으로 넘기세요',
-                              child: Icon(
-                                _isSynced ? Icons.sync : Icons.sync_disabled,
-                                color: _isSynced ? Colors.lightGreenAccent : Colors.orangeAccent,
-                                size: 14,
-                              ),
-                            ),
-                          ],
-                          const Spacer(),
-                          IconButton(
-                            iconSize: 22,
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(
-                              minWidth: 44,
-                              minHeight: 44,
-                            ),
-                            icon: const Icon(
-                              Icons.open_in_full,
-                              color: Colors.white70,
-                            ),
-                            // The overlay engine has no native channels of its own (see
-                            // main.dart's part-of note) — shareData/overlayListener is the only
-                            // way back to the main engine, which is what actually brings the
-                            // app forward and pushes the full-screen route.
-                            onPressed: _requestExpand,
-                          ),
-                          IconButton(
-                            iconSize: 22,
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(
-                              minWidth: 44,
-                              minHeight: 44,
-                            ),
-                            icon: const Icon(
-                              Icons.close,
-                              color: Colors.white70,
-                            ),
-                            onPressed: _requestClose,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                      ),
+              // Reads however much height Align actually left after SafeArea/outer padding —
+              // whatever that ends up being on this device, the three sections below split it
+              // by ratio rather than by an absolute number, so the card always exactly fills
+              // it with nothing left over.
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final cardHeight = constraints.maxHeight;
+                  return DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.82),
+                      borderRadius: BorderRadius.circular(16),
                     ),
-                    // Capped so one outlier line can't push the card past
-                    // _maxCardHeight — beyond the cap it scrolls instead.
-                    // 90 = the top bar (44) + progress bar row (~30) + the
-                    // padding around both.
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        maxHeight: _maxCardHeight - 90,
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 8,
-                        ),
-                        child: LayoutBuilder(
-                          builder: (context, constraints) => GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            // Several different meanings depending on state: nothing found,
-                            // or the user's own pasted lyrics (this card has no room to offer
-                            // a paste UI, or to usefully show hand-entered text) — tapping
-                            // opens the full-screen page either way. Plain (unsynced) fetched
-                            // lyrics — tap the right half for the next line, left half for the
-                            // previous one. Synced lyrics — tap does nothing, it already
-                            // advances on its own.
-                            onTapUp: !_loadingLyrics && _trackKey != null && (_lines.isEmpty || _isUserPasted)
-                                ? (_) => _requestExpand()
-                                : (_lines.isNotEmpty && !_isSynced && !_isUserPasted
-                                    ? (details) => _advanceLine(
-                                        details.localPosition.dx > constraints.maxWidth / 2
-                                            ? 1
-                                            : -1,
-                                      )
-                                    : null),
-                            child: SingleChildScrollView(
-                              child: Center(
-                              child: currentLine == null
-                                  ? Text(
-                                      _loadingLyrics
-                                          ? '가사 불러오는 중...'
-                                          : (_isUserPasted
-                                              ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
-                                              : (_trackKey != null
-                                                  ? '가사를 찾을 수 없음 — 눌러서 직접 입력'
-                                                  : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요')),
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 14,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          // Comfortably above Android's 48dp minimum touch-target guidance at
+                          // any normal window size — 32dp (the old icon-only visual size)
+                          // measured out as too small to reliably hit on a small floating card.
+                          height: cardHeight * _topBarRatio,
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 12),
+                              const Icon(
+                                Icons.drag_handle,
+                                color: Colors.white38,
+                                size: 18,
+                              ),
+                              if (_fromCache && _lines.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                const Icon(
+                                  Icons.bookmark,
+                                  color: Colors.amberAccent,
+                                  size: 14,
+                                ),
+                                const SizedBox(width: 2),
+                                const Text(
+                                  '저장됨',
+                                  style: TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ],
+                              if (_lines.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                Tooltip(
+                                  message: _isSynced
+                                      ? '싱크됨 — 자동으로 넘어감'
+                                      : '싱크 없음 — 눌러서 전체화면으로 보기',
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        _isSynced
+                                            ? Icons.sync
+                                            : Icons.sync_disabled,
+                                        color: _isSynced
+                                            ? Colors.lightGreenAccent
+                                            : Colors.orangeAccent,
+                                        size: 14,
                                       ),
-                                    )
-                                  : Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          currentLine.original,
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.w600,
-                                          ),
+                                      const SizedBox(width: 2),
+                                      Text(
+                                        _isSynced ? '동기화' : '비동기화',
+                                        style: TextStyle(
+                                          color: _isSynced
+                                              ? Colors.lightGreenAccent
+                                              : Colors.orangeAccent,
+                                          fontSize: 11,
                                         ),
-                                        if (currentLine.phonetic != null) ...[
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            currentLine.phonetic!,
-                                            textAlign: TextAlign.center,
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 14,
-                                            ),
-                                          ),
-                                        ],
-                                        if (currentLine.translation != null) ...[
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            currentLine.translation!,
-                                            textAlign: TextAlign.center,
-                                            style: const TextStyle(
-                                              color: Colors.white54,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              const Spacer(),
+                              IconButton(
+                                iconSize: 22,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 44,
+                                  minHeight: 44,
+                                ),
+                                icon: const Icon(
+                                  Icons.open_in_full,
+                                  color: Colors.white70,
+                                ),
+                                // The overlay engine has no native channels of its own (see
+                                // main.dart's part-of note) — shareData/overlayListener is the only
+                                // way back to the main engine, which is what actually brings the
+                                // app forward and pushes the full-screen route.
+                                onPressed: _requestExpand,
                               ),
-                            ),
+                              IconButton(
+                                iconSize: 22,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 44,
+                                  minHeight: 44,
+                                ),
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.white70,
+                                ),
+                                onPressed: _requestClose,
+                              ),
+                              const SizedBox(width: 8),
+                            ],
                           ),
                         ),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(14, 2, 6, 8),
-                      child: Row(
-                        children: [
-                          Text(
-                            _formatMs(_positionMs),
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 11,
+                        // Fixed, not capped — a shrink-to-content ConstrainedBox left a visible
+                        // transparent gap between the card and the native window's bottom edge
+                        // (the window itself is a constant size; only the card was shrinking) for
+                        // any song whose lyrics were short enough not to need the full budget.
+                        SizedBox(
+                          height: cardHeight * _lyricsAreaRatio,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 8,
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: LinearProgressIndicator(
-                                value: progress,
-                                minHeight: 4,
-                                backgroundColor: Colors.white24,
-                                valueColor: const AlwaysStoppedAnimation(
-                                  Colors.white,
+                            child: LayoutBuilder(
+                              builder: (context, constraints) => GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                // Nothing found, user-pasted text, or any other not-actually-
+                                // synced lyrics all show the same "go look at the full screen"
+                                // placeholder below — tapping anywhere opens it. Synced lyrics
+                                // tap does nothing, since it already advances on its own.
+                                onTapUp:
+                                    !_loadingLyrics &&
+                                        _trackKey != null &&
+                                        currentLine == null
+                                    ? (_) => _requestExpand()
+                                    : null,
+                                child: Center(
+                                  // Rather than a fixed font size that either wraps to 2 lines
+                                  // (clipped once all three tiers do it at once, per the
+                                  // fixed-height box above) or scrolls (unreadable at a glance on
+                                  // a card this size), every tier scales down together to
+                                  // whatever fits this fixed box — a short line renders at full
+                                  // size, a long one shrinks just enough, and nothing is ever cut
+                                  // off no matter how much text a line has.
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: currentLine == null
+                                        ? Text(
+                                            _loadingLyrics
+                                                ? '가사 불러오는 중...'
+                                                : (_isUserPasted
+                                                      ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
+                                                      : (_lines.isNotEmpty
+                                                            ? '싱크 없는 가사 — 눌러서 전체화면으로 보기'
+                                                            : (_trackKey != null
+                                                                  ? '가사를 찾을 수 없음 — 눌러서 직접 입력'
+                                                                  : '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요'))),
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: Colors.white70,
+                                              fontSize:
+                                                  cardHeight *
+                                                  _placeholderFontRatio,
+                                            ),
+                                          )
+                                        : Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                currentLine.original,
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize:
+                                                      cardHeight *
+                                                      _originalFontRatio,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                              if (currentLine.phonetic !=
+                                                  null) ...[
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  currentLine.phonetic!,
+                                                  textAlign: TextAlign.center,
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize:
+                                                        cardHeight *
+                                                        _phoneticFontRatio,
+                                                  ),
+                                                ),
+                                              ],
+                                              if (currentLine.translation !=
+                                                  null) ...[
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  currentLine.translation!,
+                                                  textAlign: TextAlign.center,
+                                                  style: TextStyle(
+                                                    color: Colors.white54,
+                                                    fontSize:
+                                                        cardHeight *
+                                                        _translationFontRatio,
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _formatMs(_durationMs),
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 11,
+                        ),
+                        SizedBox(
+                          height: cardHeight * _progressRowRatio,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 2, 6, 4),
+                            child: Row(
+                              children: [
+                                Text(
+                                  _formatMs(_positionMs),
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: LinearProgressIndicator(
+                                      value: progress,
+                                      minHeight: 4,
+                                      backgroundColor: Colors.white24,
+                                      valueColor: const AlwaysStoppedAnimation(
+                                        Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  _formatMs(_durationMs),
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  );
+                },
               ),
             ),
           ),

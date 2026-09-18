@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../data/repositories/lyrics_repository.dart';
+import '../theme/metal_theme.dart';
 
 /// A plain, static read-out of a previously-cached song's lyrics — opened from the home
 /// screen's "최근 들은 곡" list, for a song that isn't necessarily playing right now. Unlike
@@ -22,9 +23,9 @@ class SavedLyricsViewPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: MetalTheme.base,
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: MetalTheme.base,
         foregroundColor: Colors.white,
         elevation: 0,
         title: Text(
@@ -33,28 +34,34 @@ class SavedLyricsViewPage extends StatelessWidget {
           style: const TextStyle(color: Colors.white, fontSize: 18),
         ),
       ),
-      body: lines.isEmpty
-          ? const Center(
-              child: Text(
-                '저장된 가사가 없습니다',
-                style: TextStyle(color: Colors.white54),
-              ),
-            )
-          // The AppBar already accounts for the top inset, so only the bottom (system
-          // navigation bar — gesture pill or 3-button bar, whichever the device uses) needs
-          // guarding here; without it the last line or two renders right under/behind that bar.
-          : SafeArea(
-              top: false,
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 24,
-                  horizontal: 24,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: MetalTheme.backgroundGradient,
+        ),
+        child: lines.isEmpty
+            ? const Center(
+                child: Text(
+                  '저장된 가사가 없습니다',
+                  style: TextStyle(color: Colors.white54),
                 ),
-                itemCount: lines.length,
-                itemBuilder: (context, index) =>
-                    _StaticLyricRow(line: lines[index]),
+              )
+            // The AppBar already accounts for the top inset, so only the bottom (system
+            // navigation bar — gesture pill or 3-button bar, whichever the device uses) needs
+            // guarding here; without it the last line or two renders right under/behind that
+            // bar.
+            : SafeArea(
+                top: false,
+                child: ListView.builder(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 24,
+                    horizontal: 24,
+                  ),
+                  itemCount: lines.length,
+                  itemBuilder: (context, index) =>
+                      _StaticLyricRow(line: lines[index]),
+                ),
               ),
-            ),
+      ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import '../../core/platform/notification_bridge.dart';
+import '../theme/metal_theme.dart';
 
 /// Status of the two permissions this app needs that Android only grants through a
 /// system Settings screen, never a normal runtime dialog.
@@ -9,7 +10,10 @@ class PermissionStatus {
   final bool notificationAccessGranted;
   final bool overlayGranted;
 
-  const PermissionStatus({required this.notificationAccessGranted, required this.overlayGranted});
+  const PermissionStatus({
+    required this.notificationAccessGranted,
+    required this.overlayGranted,
+  });
 
   bool get allGranted => notificationAccessGranted && overlayGranted;
 
@@ -81,10 +85,15 @@ class _CompactGrantedRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const Icon(Icons.check_circle, color: Colors.green, size: 16),
+        const Icon(Icons.check_circle, color: MetalTheme.steelBright, size: 16),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+          child: Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: MetalTheme.textSecondary),
+          ),
         ),
       ],
     );
@@ -111,15 +120,28 @@ class _PermissionRow extends StatelessWidget {
     if (granted) {
       return _CompactGrantedRow(label: title);
     }
-    return Card(
-      margin: EdgeInsets.zero,
+    return MetalCard(
+      padding: EdgeInsets.zero,
       child: ListTile(
         dense: true,
         visualDensity: VisualDensity.compact,
-        leading: const Icon(Icons.error_outline, color: Colors.orange, size: 20),
+        leading: const Icon(
+          Icons.error_outline,
+          color: Colors.orangeAccent,
+          size: 20,
+        ),
         title: Text(title, style: Theme.of(context).textTheme.bodyMedium),
-        subtitle: Text(description, style: Theme.of(context).textTheme.bodySmall),
-        trailing: TextButton(onPressed: onGrant, child: const Text('허용')),
+        subtitle: Text(
+          description,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: MetalTheme.textSecondary),
+        ),
+        trailing: TextButton(
+          onPressed: onGrant,
+          style: TextButton.styleFrom(foregroundColor: MetalTheme.steelBright),
+          child: const Text('허용'),
+        ),
       ),
     );
   }
