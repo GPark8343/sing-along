@@ -1,0 +1,62 @@
+package com.singalong.sing_along.bridge;
+
+import android.content.Context;
+import android.content.Intent;
+import android.provider.Settings;
+
+import androidx.annotation.NonNull;
+import androidx.core.app.NotificationManagerCompat;
+
+import com.singalong.sing_along.notification.MediaSessionBridge;
+import com.singalong.sing_along.notification.NowPlayingInfo;
+
+import java.util.Set;
+
+import io.flutter.plugin.common.MethodCall;
+import io.flutter.plugin.common.MethodChannel;
+
+/**
+ * MethodChannel "sing_along/notification": permission status/deep-link + a synchronous
+ * snapshot of whatever {@link MediaSessionBridge} currently knows, for the main app to poll
+ * on resume (the EventChannel only delivers pushes while something is actively listening).
+ */
+public class NotificationChannelHandler implements MethodChannel.MethodCallHandler {
+
+    public static final String CHANNEL_NAME = "sing_along/notification";
+
+    private final Context appContext;
+
+    public NotificationChannelHandler(Context context) {
+        this.appContext = context.getApplicationContext();
+    }
+
+    @Override
+    public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
+        switch (call.method) {
+            case "isNotificationAccessGranted":
+                result.success(isNotificationAccessGranted());
+                break;
+            case "openNotificationListenerSettings":
+                openNotificationListenerSettings();
+                result.success(null);
+                break;
+            case "getCurrentMedia":
+                NowPlayingInfo current = MediaSessionBridge.getInstance().getCurrent();
+                result.success(current != null ? current.toMap() : null);
+                break;
+            default:
+                result.notImplemented();
+        }
+    }
+
+    private boolean isNotificationAccessGranted() {
+        Set<String> enabledPackages = NotificationManagerCompat.getEnabledListenerPackages(appContext);
+        return enabledPackages.contains(appContext.getPackageName());
+    }
+
+    private void openNotificationListenerSettings() {
+        Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        appContext.startActivity(intent);
+    }
+}
