@@ -50,3 +50,8 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Real API keys — env.example.json is the committed template; copy it to
+# env.local.json and fill in GOO_LAB_APP_ID/DEEPL_API_KEY, then run with
+# `flutter run --dart-define-from-file=env.local.json`.
+env.local.json

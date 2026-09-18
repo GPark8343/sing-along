@@ -16,8 +16,13 @@ import java.util.List;
  */
 public final class MediaSessionBridge {
 
-    /** How often the real playback position is re-checked while a session is active. */
-    private static final long POLL_INTERVAL_MS = 3000;
+    /**
+     * How often the real playback position is re-checked while a session is active. This is
+     * cheap — {@link android.media.session.MediaController#getPlaybackState()} reads a value
+     * already cached locally from the session's last callback, not a fresh cross-process call —
+     * so this can run fairly often without meaningfully costing battery/CPU.
+     */
+    private static final long POLL_INTERVAL_MS = 500;
 
     public interface Listener {
         void onNowPlayingChanged(NowPlayingInfo info);

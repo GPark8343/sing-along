@@ -28,6 +28,8 @@ class LrclibClient {
 
   final Dio _dio;
 
+  static final RegExp _titleSplitPattern = RegExp(r'\s*[-–/／]\s*');
+
   /// Notification titles/artists rarely match LRCLIB's own metadata
   /// character-for-character (extra "(Official Video)", a duration that's
   /// off by a couple seconds, "Artist - Topic" from YouTube, ...), so this
@@ -36,10 +38,14 @@ class LrclibClient {
   ///   1. exact `/get` with duration (fastest, most precise)
   ///   2. exact `/get` without duration (title/artist matched, but our
   ///      reported duration was off)
-  ///   3. `/search`, scored by string similarity against every result
-  ///      instead of trusting the first one back
-  ///   4. `/search` by title alone, for when the artist string itself
-  ///      doesn't resemble LRCLIB's record at all
+  ///   3. `/search` against every "title candidate" — the full title, plus
+  ///      each side of it split on "-"/"/" for bilingual titles like "ロッ
+  ///      クスター - ROCKSTAR" (LRCLIB's own search returns nothing for the
+  ///      combined string but finds it instantly from either half alone) —
+  ///      scored by string similarity across every candidate's results
+  ///      rather than trusting whichever query happens to return first
+  ///   4. the same candidate sweep again without the artist, for when the
+  ///      artist string itself doesn't resemble LRCLIB's record at all
   Future<LrclibLyrics?> fetchLyrics({
     required String trackName,
     required String artistName,
@@ -51,13 +57,49 @@ class LrclibClient {
     final exactNoDuration = await _getExact(trackName, artistName, null);
     if (exactNoDuration != null) return exactNoDuration;
 
-    final searched = await _searchBest(trackName, artistName, durationSeconds);
+    final candidates = _titleCandidates(trackName);
+
+    final searched = await _searchBestAcross(candidates, artistName, durationSeconds);
     if (searched != null) return searched;
 
     if (artistName.isNotEmpty) {
-      return _searchBest(trackName, '', durationSeconds);
+      return _searchBestAcross(candidates, '', durationSeconds);
     }
     return null;
+  }
+
+  List<String> _titleCandidates(String trackName) {
+    final candidates = <String>[trackName];
+    for (final part in trackName.split(_titleSplitPattern)) {
+      final trimmed = part.trim();
+      if (trimmed.isNotEmpty && !candidates.contains(trimmed)) {
+        candidates.add(trimmed);
+      }
+    }
+    return candidates;
+  }
+
+  Future<LrclibLyrics?> _searchBestAcross(
+    List<String> titleCandidates,
+    String artistName,
+    int? durationSeconds,
+  ) async {
+    Map<String, dynamic>? best;
+    var bestScore = 0.0;
+    for (final candidate in titleCandidates) {
+      final result = await _search(candidate, artistName);
+      for (final entry in result) {
+        final score = _matchScore(candidate, artistName, durationSeconds, entry);
+        if (score > bestScore) {
+          bestScore = score;
+          best = entry;
+        }
+      }
+    }
+    // Below this, the "best" result is more likely a wrong song than a
+    // messily-formatted title of the right one.
+    if (best == null || bestScore < 0.45) return null;
+    return _parse(best);
   }
 
   Future<LrclibLyrics?> _getExact(String trackName, String artistName, int? durationSeconds) async {
@@ -74,31 +116,15 @@ class LrclibClient {
     }
   }
 
-  Future<LrclibLyrics?> _searchBest(String trackName, String artistName, int? durationSeconds) async {
+  Future<List<Map<String, dynamic>>> _search(String trackName, String artistName) async {
     try {
       final response = await _dio.get<List<dynamic>>('/search', queryParameters: {
         'track_name': trackName,
         'artist_name': ?artistName.isEmpty ? null : artistName,
       });
-      final results = response.data ?? const [];
-      if (results.isEmpty) return null;
-
-      Map<String, dynamic>? best;
-      var bestScore = 0.0;
-      for (final entry in results) {
-        final result = entry as Map<String, dynamic>;
-        final score = _matchScore(trackName, artistName, durationSeconds, result);
-        if (score > bestScore) {
-          bestScore = score;
-          best = result;
-        }
-      }
-      // Below this, the "best" result is more likely a wrong song than a
-      // messily-formatted title of the right one.
-      if (best == null || bestScore < 0.45) return null;
-      return _parse(best);
+      return (response.data ?? const []).cast<Map<String, dynamic>>();
     } on DioException {
-      return null;
+      return const [];
     }
   }
 

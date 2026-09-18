@@ -5,6 +5,7 @@ import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
+import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 
 import java.util.List;
@@ -135,7 +136,7 @@ public class MediaNotificationListenerService extends NotificationListenerServic
         String artist = metadata != null ? metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) : null;
         long durationMs = metadata != null ? metadata.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0L;
         PlaybackState state = controller.getPlaybackState();
-        long positionMs = state != null ? state.getPosition() : 0L;
+        long positionMs = extrapolatedPosition(state);
         return new NowPlayingInfo(
                 controller.getPackageName(),
                 title,
@@ -143,5 +144,20 @@ public class MediaNotificationListenerService extends NotificationListenerServic
                 durationMs,
                 positionMs,
                 MediaSessionBridge.nowElapsedRealtime());
+    }
+
+    /**
+     * {@link PlaybackState#getPosition()} is the position as of the session's last report, not
+     * "right now" — a session that only reports once every few seconds would otherwise always
+     * look like it's lagging behind by however long it's been since that report. Project it
+     * forward using the session's own last-update timestamp and playback speed instead of
+     * trusting the raw value, so a coarse poll interval still yields an accurate line.
+     */
+    private long extrapolatedPosition(PlaybackState state) {
+        if (state == null) return 0L;
+        if (state.getState() != PlaybackState.STATE_PLAYING) return state.getPosition();
+        long elapsedSinceReport = MediaSessionBridge.nowElapsedRealtime() - state.getLastPositionUpdateTime();
+        if (elapsedSinceReport < 0) return state.getPosition(); // clock skew guard
+        return state.getPosition() + (long) (elapsedSinceReport * state.getPlaybackSpeed());
     }
 }

@@ -96,22 +96,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       artist: nowPlaying.artist ?? '',
       durationSeconds: nowPlaying.durationMs > 0 ? (nowPlaying.durationMs / 1000).round() : null,
     );
-    final found = result?.hasLyrics ?? false;
-    if (mounted) setState(() => _lyricsStatus = found ? '가사 로드됨' : '가사를 찾을 수 없음');
+    if (mounted) setState(() => _lyricsStatus = _statusFor(result));
     _lastLyricsPayload = {
       'type': 'lyrics',
-      'found': found,
+      'found': result.found,
       'trackKey': nowPlaying.trackKey,
       'title': nowPlaying.title,
       'artist': nowPlaying.artist ?? '',
       'durationMs': nowPlaying.durationMs,
-      'plainLyrics': result?.plainLyrics,
-      'syncedLyrics': result?.syncedLyrics,
+      'lines': [
+        for (final line in result.lines)
+          {'t': line.timestampMs, 'o': line.original, 'p': line.phonetic, 'tr': line.translation},
+      ],
     };
     // shareData only reaches a listener that's alive *right now* — if the
     // overlay isn't open yet, this is lost, so _toggleOverlay() re-sends
     // this same cached payload once the overlay actually comes up.
     await FlutterOverlayWindow.shareData(_lastLyricsPayload);
+  }
+
+  String _statusFor(LyricsResult result) {
+    if (!result.found) return '가사를 찾을 수 없음';
+    final hasPhonetic = result.lines.any((line) => line.phonetic != null);
+    final hasTranslation = result.lines.any((line) => line.translation != null);
+    final tiers = [if (hasPhonetic) '독음', if (hasTranslation) '번역'];
+    return tiers.isEmpty ? '가사 로드됨 (원문만)' : '가사 로드됨 · ${tiers.join(' · ')}';
   }
 
   @override
@@ -143,6 +152,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_overlayActive) {
       await FlutterOverlayWindow.closeOverlay();
     } else {
+      // showOverlay()'s `height` is consumed as raw physical pixels (unlike
+      // the plugin's resizeOverlay(), which runs it through a dp->px
+      // conversion), so it has to be scaled by the device's actual pixel
+      // ratio to land on a sane logical size. This is a fixed window sized
+      // for the worst case (OverlayRoot's _maxCardHeight + top-inset/padding
+      // margin) — the plugin's resizeOverlay() throws MissingPluginException
+      // when called from the overlay isolate, so there's no reliable way to
+      // shrink the real window per line; instead the *visible* card inside
+      // it sizes itself to content and sits within this fixed budget (see
+      // overlay_main.dart). Read the ratio before any `await` so it isn't a
+      // stale BuildContext read.
+      final devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
+      final overlayHeightPx = (440 * devicePixelRatio).round();
       // OverlayService self-destructs shortly after creating its window if
       // showOverlay() is called while an instance is already alive natively
       // (e.g. one that survived a force-stop on some OEM skins) — always
@@ -152,7 +174,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await Future.delayed(const Duration(milliseconds: 500));
       }
       await FlutterOverlayWindow.showOverlay(
-        height: 480,
+        height: overlayHeightPx,
         alignment: OverlayAlignment.topCenter,
         // Pin the start position explicitly rather than relying on the
         // plugin's default (-statusBarHeight), which assumes top-anchored

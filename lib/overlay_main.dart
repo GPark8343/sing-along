@@ -24,9 +24,16 @@ class OverlayApp extends StatelessWidget {
 
 class _LyricLine {
   final int? timestampMs; // null when this song has no LRC sync data
-  final String text;
+  final String original;
+  final String? phonetic; // Japanese songs only, once Goo Lab is configured
+  final String? translation; // once DeepL is configured
 
-  const _LyricLine(this.timestampMs, this.text);
+  const _LyricLine({
+    required this.timestampMs,
+    required this.original,
+    this.phonetic,
+    this.translation,
+  });
 }
 
 class OverlayRoot extends StatefulWidget {
@@ -37,7 +44,16 @@ class OverlayRoot extends StatefulWidget {
 }
 
 class _OverlayRootState extends State<OverlayRoot> {
-  static final RegExp _lrcLine = RegExp(r'^\[(\d{2}):(\d{2})[.:](\d{2,3})\]\s*(.*)$');
+  // The native window itself is a fixed, generous size (see main.dart's
+  // showOverlay call) because this plugin's resizeOverlay() is broken —
+  // calling it from the overlay isolate throws MissingPluginException, so
+  // there's no reliable way to resize the real window per line. Instead the
+  // *visible* card sizes itself to content (mainAxisSize.min below) and
+  // sits at the top of the transparent window, so it still looks like a
+  // compact one-line overlay for a short lyric rather than a fixed block —
+  // only a genuinely long line grows the card, capped here with scroll
+  // fallback so it can never exceed the window's actual height.
+  static const double _maxCardHeight = 380;
 
   StreamSubscription<dynamic>? _messageSubscription;
   List<_LyricLine> _lines = const [];
@@ -50,7 +66,9 @@ class _OverlayRootState extends State<OverlayRoot> {
   @override
   void initState() {
     super.initState();
-    _messageSubscription = FlutterOverlayWindow.overlayListener.listen(_onMessage);
+    _messageSubscription = FlutterOverlayWindow.overlayListener.listen(
+      _onMessage,
+    );
   }
 
   @override
@@ -71,13 +89,24 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   void _onLyrics(Map event) {
     final found = event['found'] as bool? ?? false;
+    final rawLines = event['lines'] as List<dynamic>? ?? const [];
     setState(() {
       _trackKey = event['trackKey'] as String?;
       _durationMs = event['durationMs'] as int?;
       _positionMs = null;
       _offsetMs = 0;
       _currentIndex = 0;
-      _lines = found ? _parseLines(event['plainLyrics'] as String?, event['syncedLyrics'] as String?) : const [];
+      _lines = found
+          ? [
+              for (final entry in rawLines)
+                _LyricLine(
+                  timestampMs: (entry as Map)['t'] as int?,
+                  original: entry['o'] as String,
+                  phonetic: entry['p'] as String?,
+                  translation: entry['tr'] as String?,
+                ),
+            ]
+          : const [];
     });
   }
 
@@ -92,32 +121,6 @@ class _OverlayRootState extends State<OverlayRoot> {
     });
   }
 
-  List<_LyricLine> _parseLines(String? plain, String? synced) {
-    if (synced != null && synced.trim().isNotEmpty) {
-      final lines = <_LyricLine>[];
-      for (final raw in synced.split('\n')) {
-        final match = _lrcLine.firstMatch(raw);
-        if (match == null) continue;
-        final text = match.group(4)!.trim();
-        if (text.isEmpty) continue;
-        final minutes = int.parse(match.group(1)!);
-        final seconds = int.parse(match.group(2)!);
-        final fraction = match.group(3)!;
-        final millis = fraction.length == 2 ? int.parse(fraction) * 10 : int.parse(fraction);
-        lines.add(_LyricLine(minutes * 60000 + seconds * 1000 + millis, text));
-      }
-      if (lines.isNotEmpty) return lines;
-    }
-    // Fallback tier: plain text only, no timestamps — current line advances
-    // by tapping instead of tracking playback position.
-    final plainText = plain ?? '';
-    return plainText
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .map((line) => _LyricLine(null, line))
-        .toList();
-  }
 
   bool get _isSynced => _lines.isNotEmpty && _lines.first.timestampMs != null;
 
@@ -150,82 +153,163 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   @override
   Widget build(BuildContext context) {
-    final currentLine = _lines.isEmpty ? null : _lines[_currentIndex.clamp(0, _lines.length - 1)];
-    final progress = (_durationMs != null && _durationMs! > 0 && _positionMs != null)
+    final currentLine = _lines.isEmpty
+        ? null
+        : _lines[_currentIndex.clamp(0, _lines.length - 1)];
+    final progress =
+        (_durationMs != null && _durationMs! > 0 && _positionMs != null)
         ? (_positionMs! / _durationMs!).clamp(0.0, 1.0)
         : 0.0;
 
     return Material(
       color: Colors.transparent,
       child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.82),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  height: 32,
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 12),
-                      const Icon(Icons.drag_handle, color: Colors.white38, size: 18),
-                      const Spacer(),
-                      IconButton(
-                        iconSize: 18,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                        icon: const Icon(Icons.close, color: Colors.white70),
-                        onPressed: () => FlutterOverlayWindow.closeOverlay(),
-                      ),
-                      const SizedBox(width: 8),
-                    ],
-                  ),
+        // Align + a full-width SizedBox split the two axes: full window
+        // width (so the card still spans edge to edge) but only as much
+        // height as the content actually needs (Align hands its child loose
+        // constraints, so the mainAxisSize.min Column below isn't forced to
+        // stretch to the window's full — fixed, oversized — height).
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: SizedBox(
+              width: double.infinity,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.82),
+                  borderRadius: BorderRadius.circular(16),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _advanceManual,
-                    child: currentLine == null
-                        ? const Text(
-                            '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white70, fontSize: 14),
-                          )
-                        : Text(
-                            currentLine.text,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      height: 32,
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 12),
+                          const Icon(
+                            Icons.drag_handle,
+                            color: Colors.white38,
+                            size: 18,
                           ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 2, 6, 8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: progress,
-                            minHeight: 4,
-                            backgroundColor: Colors.white24,
-                            valueColor: const AlwaysStoppedAnimation(Colors.white),
+                          const Spacer(),
+                          IconButton(
+                            iconSize: 18,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(
+                              minWidth: 32,
+                              minHeight: 32,
+                            ),
+                            icon: const Icon(
+                              Icons.close,
+                              color: Colors.white70,
+                            ),
+                            onPressed: () =>
+                                FlutterOverlayWindow.closeOverlay(),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                      ),
+                    ),
+                    // Capped so one outlier line can't push the card past
+                    // _maxCardHeight — beyond the cap it scrolls instead.
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxHeight: _maxCardHeight - 78,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 8,
+                        ),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _advanceManual,
+                          child: SingleChildScrollView(
+                            child: Center(
+                              child: currentLine == null
+                                  ? const Text(
+                                      '오버레이 준비됨 — 다른 앱에서 음악을 재생해보세요',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 14,
+                                      ),
+                                    )
+                                  : Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          currentLine.original,
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        if (currentLine.phonetic != null) ...[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            currentLine.phonetic!,
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                        ],
+                                        if (currentLine.translation != null) ...[
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            currentLine.translation!,
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      _OffsetButton(label: '-1s', onTap: () => _adjustOffset(-1000)),
-                      _OffsetButton(label: '+1s', onTap: () => _adjustOffset(1000)),
-                    ],
-                  ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 2, 6, 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: progress,
+                                minHeight: 4,
+                                backgroundColor: Colors.white24,
+                                valueColor: const AlwaysStoppedAnimation(
+                                  Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _OffsetButton(
+                            label: '-1s',
+                            onTap: () => _adjustOffset(-1000),
+                          ),
+                          _OffsetButton(
+                            label: '+1s',
+                            onTap: () => _adjustOffset(1000),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -247,7 +331,10 @@ class _OffsetButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(6),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        child: Text(
+          label,
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        ),
       ),
     );
   }
