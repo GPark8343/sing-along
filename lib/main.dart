@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import 'app/lyrics/full_screen_lyrics_page.dart';
@@ -26,6 +27,20 @@ part 'overlay_main.dart';
 void main() async {
   // Only the main engine ever touches Hive — see hive_bootstrap.dart.
   WidgetsFlutterBinding.ensureInitialized();
+  // Every screen in the main engine shares the same MetalTheme.base background, so this is set
+  // once globally rather than per-page — otherwise the system nav bar defaults to its own
+  // light/gray chrome, which stands out against the app's dark theme.
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      systemNavigationBarColor: MetalTheme.base,
+      systemNavigationBarIconBrightness: Brightness.light,
+      systemNavigationBarDividerColor: MetalTheme.base,
+      // On Android 15+ (edge-to-edge enforced for apps targeting API 35+, which this one
+      // does), the OS paints a translucent contrast scrim over the nav bar color by default —
+      // without turning that off, our exact color gets washed out lighter than intended.
+      systemNavigationBarContrastEnforced: false,
+    ),
+  );
   final boxes = await initHive();
   runApp(SingAlongApp(boxes: boxes));
 }
@@ -90,6 +105,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // when a newer track change starts recognize it's now stale once it finally completes.
   String? _latestRequestedTrackKey;
   bool _overlayPositionSendInFlight = false;
+  final TextEditingController _songSearchController = TextEditingController();
+  final FocusNode _songSearchFocusNode = FocusNode();
+  final GlobalKey _songSearchFieldKey = GlobalKey();
+  String _songSearchQuery = '';
 
   @override
   void initState() {
@@ -118,6 +137,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     _trackChangeSubscription = _watcher.trackChanges.listen(_onTrackChanged);
     _refreshStatus();
+    // The keyboard covers the bottom of the screen when the search field is focused, hiding
+    // the results list right below it. Two things fix that together: collapsing the "현재 재생
+    // 중" card and "가사 표시" button (below) frees up most of the space the keyboard would
+    // otherwise eat into, and scrolling the field to the top of the viewport (instead of the
+    // default "just barely visible" alignment) uses whatever room is left as efficiently as
+    // possible. Note: whether the card/button actually collapse is driven by keyboard
+    // visibility (MediaQuery.viewInsets.bottom in build()), not by focus — dismissing the
+    // keyboard via the system back button/gesture hides the IME without clearing Flutter's
+    // FocusNode.hasFocus, so a focus-driven collapse would get stuck collapsed forever with no
+    // way to trigger it back open.
+    _songSearchFocusNode.addListener(() {
+      if (!_songSearchFocusNode.hasFocus) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final fieldContext = _songSearchFieldKey.currentContext;
+        if (fieldContext == null) return;
+        Scrollable.ensureVisible(
+          fieldContext,
+          alignment: 0.0,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      });
+    });
   }
 
   @override
@@ -127,6 +169,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _trackChangeSubscription?.cancel();
     _overlayMessageSubscription?.cancel();
     _stopDebounceTimer?.cancel();
+    _songSearchController.dispose();
+    _songSearchFocusNode.dispose();
     super.dispose();
   }
 
@@ -173,6 +217,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await FlutterOverlayWindow.closeOverlay();
       if (mounted) setState(() => _overlayActive = false);
       await NotificationBridge.bringToFront();
+      _songSearchFocusNode.unfocus();
       if (mounted) {
         await Navigator.of(context).push(
           _fadeThroughRoute(
@@ -188,6 +233,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         );
+        _songSearchFocusNode.unfocus();
       }
     } finally {
       // Guaranteed to clear even if bringToFront/closeOverlay/the route throws — otherwise a
@@ -334,12 +380,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await FlutterOverlayWindow.shareData(_lastLyricsPayload);
   }
 
-  static const int _maxRecentSongs = 4;
+  // The "최근 들은 곡" section on the home screen only ever shows this many — but the box
+  // itself keeps far more (see _recentSongsStorageCap below) so the title search field further
+  // down can still find something played a while ago, not just the last handful of songs.
+  static const int _recentSongsDisplayCount = 3;
+  // A generous safety cap so the box doesn't grow forever over a long listening history —
+  // not meant to be reached in normal use, unlike the old 4-item display cap this replaced.
+  static const int _recentSongsStorageCap = 500;
 
   // Keyed by the same cache key the lyrics box uses, so replaying a song updates its
   // position in the list instead of adding a duplicate. Only title/artist are duplicated
-  // here — the actual lines are looked up from the lyrics box by key when the user opens one,
-  // so this stays small even with a long listening history.
+  // here — the actual lines are looked up from the lyrics box by key when the user opens one.
   Future<void> _recordRecentSong(NowPlaying nowPlaying) async {
     final key = TitleNormalizer.cacheKey(
       nowPlaying.title,
@@ -355,14 +406,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     final box = widget.boxes.recentSongs;
-    if (box.length > _maxRecentSongs) {
+    if (box.length > _recentSongsStorageCap) {
       final sortedKeys = box.keys.toList()
         ..sort((a, b) => box.get(b)!.playedAt.compareTo(box.get(a)!.playedAt));
-      final staleKeys = sortedKeys.skip(_maxRecentSongs);
+      final staleKeys = sortedKeys.skip(_recentSongsStorageCap);
       await box.deleteAll(staleKeys);
     }
     if (mounted) {
-      setState(() {}); // recent-songs section reads straight from the box
+      setState(() {}); // recent-songs/search sections read straight from the box
     }
   }
 
@@ -372,9 +423,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return entries;
   }
 
+  // Case-insensitive substring match on title (and artist, so searching "novelbright" finds
+  // their songs too even if the query doesn't match any title) — across every song this device
+  // has ever fetched lyrics for, not just the "최근 들은 곡" shortlist.
+  List<RecentSongEntry> _searchRecentSongs(String query) {
+    final needle = query.trim().toLowerCase();
+    if (needle.isEmpty) return const [];
+    return _recentSongsSorted()
+        .where(
+          (entry) =>
+              entry.title.toLowerCase().contains(needle) ||
+              entry.artist.toLowerCase().contains(needle),
+        )
+        .toList();
+  }
+
   Future<void> _openSavedLyrics(RecentSongEntry entry) async {
     final result = _lyricsRepository.getCachedByKey(entry.cacheKey);
     if (!mounted || result == null) return;
+    // Otherwise the search field (still focused from picking this result out of the results
+    // list) regains focus on return and pops the keyboard straight back up over the home
+    // screen — unfocus before leaving and again after returning covers both the outgoing
+    // transition and Android restoring focus to it once this route is back on top.
+    _songSearchFocusNode.unfocus();
     await Navigator.of(context).push(
       _fadeThroughRoute(
         SavedLyricsViewPage(
@@ -384,6 +455,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     );
+    _songSearchFocusNode.unfocus();
   }
 
   // The full-screen page's sync icon is the only place this gets toggled — reversible any
@@ -498,12 +570,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         overlayTitle: 'sing-along',
         overlayContent: '가사 오버레이가 실행 중입니다',
       );
-      // The whole point of the overlay is floating on top of whatever app the user actually
-      // wants to be using — showing it and then leaving this app's own screen sitting in front
-      // of it would defeat that, so step out of the way back to wherever they were (matches
-      // the full-screen lyrics page's own back-button behavior). This backgrounds the
-      // Activity, not the process, so the resend below still runs normally.
-      await NotificationBridge.moveTaskToBack();
       // The overlay engine takes a moment to start and register its message
       // handler; resend whatever lyrics we already have once it's had time
       // to come up, since any earlier shareData call would have been missed.
@@ -530,12 +596,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    // Same 360dp-reference ratio pattern the lyrics pages use, applied to this screen's own
+    // hardcoded chrome sizes (icons, the wordmark, section headers) so they scale with the
+    // actual screen instead of staying fixed dp/pt numbers on every device.
+    final screenWidth = MediaQuery.of(context).size.width;
+    const titleRatio = 0.0611; // 22/360
+    const sectionIconRatio = 0.05; // 18/360
+    const statusTextRatio = 0.0333; // 12/360
+    // Driven by actual keyboard visibility rather than the search field's focus state — the
+    // system back button/gesture hides the IME without clearing Flutter's focus, so a
+    // focus-driven flag would get stuck collapsed with no way to bring the card/button back.
+    final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
     return Scaffold(
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.graphic_eq, size: 22, color: MetalTheme.steelBright),
+            Icon(
+              Icons.graphic_eq,
+              size: screenWidth * titleRatio,
+              color: MetalTheme.steelBright,
+            ),
             const SizedBox(width: 8),
             // A flat title read plain against the same gradient every other screen already
             // has — a brushed-chrome shine across the letters (light -> bright -> light)
@@ -549,11 +630,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ],
                 stops: [0.0, 0.55, 1.0],
               ).createShader(bounds),
-              child: const Text(
+              child: Text(
                 'sing-along',
                 style: TextStyle(
                   color: Colors.white,
-                  fontSize: 22,
+                  fontSize: screenWidth * titleRatio,
                   letterSpacing: 1.4,
                   fontWeight: FontWeight.w800,
                 ),
@@ -568,7 +649,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
         child: SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
+            // Extra bottom padding matching the keyboard's height, so there's always enough
+            // scroll room to bring the search field (and the results just below it) above the
+            // keyboard — without this, a short results list can't be scrolled far enough
+            // because the content simply runs out before the field reaches the top.
+            padding: EdgeInsets.fromLTRB(
+              16,
+              16,
+              16,
+              16 + MediaQuery.of(context).viewInsets.bottom,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -586,70 +676,106 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 // compact granted-row form (the common case) than when it's still showing full
                 // cards.
                 SizedBox(height: _permissionStatus.allGranted ? 12 : 24),
-                MetalCard(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.graphic_eq,
-                            size: 18,
-                            color: MetalTheme.steel,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '현재 재생 중',
-                            style: Theme.of(context).textTheme.titleMedium
-                                ?.copyWith(letterSpacing: 0.3),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      if (_nowPlaying == null)
-                        const Text(
-                          '감지된 곡이 없습니다 — 다른 앱에서 음악을 재생해보세요',
-                          style: TextStyle(color: MetalTheme.textSecondary),
-                        )
-                      else ...[
-                        Text(
-                          _nowPlaying!.title,
-                          style: Theme.of(context).textTheme.bodyLarge
-                              ?.copyWith(fontWeight: FontWeight.w600),
-                        ),
-                        Text(
-                          _nowPlaying!.artist ?? '',
-                          style: const TextStyle(
-                            color: MetalTheme.textSecondary,
-                          ),
-                        ),
-                        Text(
-                          '${(_nowPlaying!.positionMs / 1000).toStringAsFixed(0)}s / '
-                          '${(_nowPlaying!.durationMs / 1000).toStringAsFixed(0)}s',
-                          style: const TextStyle(color: MetalTheme.textMuted),
-                        ),
-                        if (_lyricsStatus.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            _lyricsStatus,
-                            style: const TextStyle(
-                              color: MetalTheme.steelBright,
-                              fontSize: 12,
+                // Collapsed while the search field is focused — the keyboard eats roughly half
+                // the screen at that point, and this is by far the biggest reclaimable chunk of
+                // space, leaving much more room for the results list to actually show above it.
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                  alignment: Alignment.topCenter,
+                  child: keyboardOpen
+                      ? const SizedBox(width: double.infinity)
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            MetalCard(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.graphic_eq,
+                                        size: screenWidth * sectionIconRatio,
+                                        color: MetalTheme.steel,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        '현재 재생 중',
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleMedium
+                                            ?.copyWith(letterSpacing: 0.3),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  if (_nowPlaying == null)
+                                    const Text(
+                                      '감지된 곡이 없습니다 — 다른 앱에서 음악을 재생해보세요',
+                                      style: TextStyle(
+                                        color: MetalTheme.textSecondary,
+                                      ),
+                                    )
+                                  else ...[
+                                    Text(
+                                      _nowPlaying!.title,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyLarge
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                    Text(
+                                      _nowPlaying!.artist ?? '',
+                                      style: const TextStyle(
+                                        color: MetalTheme.textSecondary,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${(_nowPlaying!.positionMs / 1000).toStringAsFixed(0)}s / '
+                                      '${(_nowPlaying!.durationMs / 1000).toStringAsFixed(0)}s',
+                                      style: const TextStyle(
+                                        color: MetalTheme.textMuted,
+                                      ),
+                                    ),
+                                    if (_lyricsStatus.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _lyricsStatus,
+                                        style: TextStyle(
+                                          color: MetalTheme.steelBright,
+                                          fontSize:
+                                              screenWidth * statusTextRatio,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ],
+                              ),
                             ),
-                          ),
-                        ],
-                      ],
-                    ],
-                  ),
+                            const SizedBox(height: 24),
+                            if (_permissionStatus.overlayGranted)
+                              MetalButton(
+                                icon: _overlayActive
+                                    ? Icons.close
+                                    : Icons.lyrics_outlined,
+                                label: _overlayActive ? '가사 닫기' : '가사 표시',
+                                onPressed: _toggleInFlight
+                                    ? null
+                                    : _toggleOverlay,
+                              ),
+                            const SizedBox(height: 20),
+                          ],
+                        ),
                 ),
-                const SizedBox(height: 24),
-                if (_permissionStatus.overlayGranted)
-                  MetalButton(
-                    icon: _overlayActive ? Icons.close : Icons.lyrics_outlined,
-                    label: _overlayActive ? '가사 닫기' : '가사 표시',
-                    onPressed: _toggleInFlight ? null : _toggleOverlay,
-                  ),
-                ..._buildRecentSongsSection(context),
+                const SizedBox(height: 12),
+                _buildSongSearchField(context),
+                if (_songSearchQuery.trim().isNotEmpty)
+                  ..._buildSearchResultsSection(context)
+                else
+                  ..._buildRecentSongsSection(context),
               ],
             ),
           ),
@@ -661,13 +787,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // Hidden entirely until there's at least one song to show — an empty "최근 들은 곡" card on
   // first run would just be clutter with nothing useful in it.
   List<Widget> _buildRecentSongsSection(BuildContext context) {
-    final recent = _recentSongsSorted();
+    final recent = _recentSongsSorted().take(_recentSongsDisplayCount).toList();
     if (recent.isEmpty) return const [];
     return [
       const SizedBox(height: 24),
       Row(
         children: [
-          const Icon(Icons.history, size: 18, color: MetalTheme.steel),
+          Icon(
+            Icons.history,
+            size: MediaQuery.of(context).size.width * 0.05,
+            color: MetalTheme.steel,
+          ),
           const SizedBox(width: 8),
           Text(
             '최근 들은 곡',
@@ -707,6 +837,128 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ],
         ),
       ),
+    ];
+  }
+
+  Widget _buildSongSearchField(BuildContext context) {
+    // Same 360dp-reference ratio pattern the rest of this screen uses (icons, wordmark,
+    // section headers), applied here so the search field's text and icons scale with the
+    // actual screen instead of staying fixed dp/pt sizes on every device.
+    final screenWidth = MediaQuery.of(context).size.width;
+    const textRatio = 0.0444; // 16/360
+    const iconRatio = 0.05; // 18/360
+    return TextField(
+      key: _songSearchFieldKey,
+      controller: _songSearchController,
+      focusNode: _songSearchFocusNode,
+      onChanged: (value) => setState(() => _songSearchQuery = value),
+      style: TextStyle(color: Colors.white, fontSize: screenWidth * textRatio),
+      decoration: InputDecoration(
+        hintText: '곡 제목이나 가수로 저장된 가사 검색',
+        hintStyle: TextStyle(
+          color: MetalTheme.textMuted,
+          fontSize: screenWidth * textRatio,
+        ),
+        prefixIcon: Icon(
+          Icons.search,
+          color: MetalTheme.steel,
+          size: screenWidth * iconRatio,
+        ),
+        suffixIcon: _songSearchQuery.isEmpty
+            ? null
+            : IconButton(
+                icon: Icon(
+                  Icons.clear,
+                  color: MetalTheme.textMuted,
+                  size: screenWidth * iconRatio,
+                ),
+                onPressed: () {
+                  _songSearchController.clear();
+                  setState(() => _songSearchQuery = '');
+                },
+              ),
+        filled: true,
+        fillColor: MetalTheme.surfaceDark,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: MetalTheme.edgeHighlight),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: MetalTheme.edgeHighlight),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: MetalTheme.steelBright),
+        ),
+      ),
+    );
+  }
+
+  // Shown in place of "최근 들은 곡" whenever the search field has text — searches across the
+  // full saved-song index (not just the 4 most recently played) by title/artist substring.
+  List<Widget> _buildSearchResultsSection(BuildContext context) {
+    final results = _searchRecentSongs(_songSearchQuery);
+    return [
+      const SizedBox(height: 24),
+      Row(
+        children: [
+          Icon(
+            Icons.search,
+            size: MediaQuery.of(context).size.width * 0.05,
+            color: MetalTheme.steel,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '검색 결과',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(letterSpacing: 0.3),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      if (results.isEmpty)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            '일치하는 저장된 가사가 없습니다',
+            style: TextStyle(color: MetalTheme.textSecondary),
+          ),
+        )
+      else
+        MetalCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final entry in results)
+                ListTile(
+                  title: Text(
+                    entry.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: entry.artist.isEmpty
+                      ? null
+                      : Text(
+                          entry.artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: MetalTheme.textSecondary,
+                          ),
+                        ),
+                  trailing: const Icon(
+                    Icons.chevron_right,
+                    color: MetalTheme.steel,
+                  ),
+                  onTap: () => _openSavedLyrics(entry),
+                ),
+            ],
+          ),
+        ),
     ];
   }
 }

@@ -80,7 +80,10 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   // — see _MarqueeText's own comment) stays accurate instead of assuming a fixed icon count.
   int get _appBarActionCount {
     if (_lines.isEmpty || _showPasteForm) return 0;
-    return 2 + (_isUserPasted ? 1 : 0); // sync/tooltip + edit, plus refresh when pasted
+    return 2 +
+        (_isUserPasted
+            ? 1
+            : 0); // sync/tooltip + edit, plus refresh when pasted
   }
 
   @override
@@ -288,7 +291,11 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
           elevation: 0,
           title: _MarqueeText(
             text: _titleAndArtist(),
-            style: const TextStyle(color: Colors.white, fontSize: 18),
+            // Same 360dp-reference ratio pattern as _LyricRow (18/360).
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: MediaQuery.of(context).size.width * 0.05,
+            ),
             // Was a flat magic number sized for exactly 2 action icons — stopped matching
             // reality (clipping the right edge of long titles) once a 3rd (refresh) icon could
             // show up too. Counting whatever's actually in `actions` below keeps this accurate
@@ -389,9 +396,13 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                     child: ScrollablePositionedList.builder(
                       itemScrollController: _scrollController,
                       itemCount: _lines.length,
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 140,
-                        horizontal: 24,
+                      // Same 360x800dp reference frame _LyricRow's font ratios use — enough
+                      // top/bottom room for the current line to center comfortably even at
+                      // the very start/end of the list, scaled to the actual screen instead
+                      // of staying a fixed dp budget on every device.
+                      padding: EdgeInsets.symmetric(
+                        vertical: MediaQuery.of(context).size.height * 0.175,
+                        horizontal: MediaQuery.of(context).size.width * 0.0667,
                       ),
                       // Without sync data _currentIndex isn't tracking playback at all — it's
                       // just wherever it last happened to be (usually 0) — so highlighting it as
@@ -488,10 +499,24 @@ class _LyricRow extends StatelessWidget {
   final LyricsLine line;
   final bool isCurrent;
 
+  // Ratios of screen width, calibrated against a 360dp-wide reference device (a common
+  // Android baseline) to land on the same point sizes this page already used — but now
+  // scaling with the actual screen instead of staying fixed on a tablet or a compact phone.
+  // 독음 carries the current line's emphasis, so it grows the most; the other two tiers still
+  // grow a little so the current line reads clearly without competing with it for attention.
+  static const double _originalFontRatio = 0.0417;
+  static const double _originalFontRatioCurrent = 0.0500;
+  static const double _phoneticFontRatio = 0.0361;
+  static const double _phoneticFontRatioCurrent = 0.0472;
+  static const double _translationFontRatio = 0.0500;
+  static const double _translationFontRatioCurrent = 0.0528;
+
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
+      padding: EdgeInsets.symmetric(vertical: screenHeight * 0.0175),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -499,32 +524,39 @@ class _LyricRow extends StatelessWidget {
             line.original,
             style: TextStyle(
               color: Colors.white70,
-              fontSize: isCurrent ? 18 : 15,
+              fontSize:
+                  screenWidth *
+                  (isCurrent ? _originalFontRatioCurrent : _originalFontRatio),
               fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
             ),
           ),
-          // The 독음 tier is the one that actually carries the current line's emphasis — the
-          // other two still grow a little so the current line reads clearly, but stay smaller
-          // than the phonetic reading rather than competing with it for attention.
           if (line.phonetic != null) ...[
-            const SizedBox(height: 2),
+            SizedBox(height: screenHeight * 0.0025),
             Text(
               line.phonetic!,
               style: TextStyle(
                 color: Colors.white70,
-                fontSize: isCurrent ? 17 : 13,
+                fontSize:
+                    screenWidth *
+                    (isCurrent
+                        ? _phoneticFontRatioCurrent
+                        : _phoneticFontRatio),
                 fontStyle: FontStyle.italic,
                 fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
               ),
             ),
           ],
           if (line.translation != null) ...[
-            const SizedBox(height: 4),
+            SizedBox(height: screenHeight * 0.005),
             Text(
               line.translation!,
               style: TextStyle(
                 color: Colors.white70,
-                fontSize: isCurrent ? 19 : 18,
+                fontSize:
+                    screenWidth *
+                    (isCurrent
+                        ? _translationFontRatioCurrent
+                        : _translationFontRatio),
                 fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
               ),
             ),
@@ -605,7 +637,8 @@ class _MarqueeTextState extends State<_MarqueeText>
     // long the title actually was. Computing the available width ourselves from the screen
     // size (netting out however much room the caller says the rest of the AppBar needs right
     // now) sidesteps that instead of depending on it.
-    final availableWidth = MediaQuery.of(context).size.width - widget.reservedWidth;
+    final availableWidth =
+        MediaQuery.of(context).size.width - widget.reservedWidth;
     final painter = TextPainter(
       text: TextSpan(text: widget.text, style: widget.style),
       textDirection: TextDirection.ltr,

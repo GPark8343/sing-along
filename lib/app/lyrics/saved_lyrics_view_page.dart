@@ -31,7 +31,11 @@ class SavedLyricsViewPage extends StatelessWidget {
         title: Text(
           artist.isEmpty ? title : '$title - $artist',
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.white, fontSize: 18),
+          // Same 360dp-reference ratio pattern _LyricRow uses (18/360).
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: MediaQuery.of(context).size.width * 0.05,
+          ),
         ),
       ),
       body: Container(
@@ -52,9 +56,9 @@ class SavedLyricsViewPage extends StatelessWidget {
             : SafeArea(
                 top: false,
                 child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 24,
-                    horizontal: 24,
+                  padding: EdgeInsets.symmetric(
+                    vertical: MediaQuery.of(context).size.height * 0.03,
+                    horizontal: MediaQuery.of(context).size.width * 0.0667,
                   ),
                   itemCount: lines.length,
                   itemBuilder: (context, index) =>
@@ -71,18 +75,25 @@ class _StaticLyricRow extends StatelessWidget {
 
   final LyricsLine line;
 
+  // Same 360dp-reference ratio pattern FullScreenLyricsPage's _LyricRow uses.
+  static const double _originalFontRatio = 0.0472;
+  static const double _tierFontRatio = 0.0389;
+
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: EdgeInsets.symmetric(
+        vertical: MediaQuery.of(context).size.height * 0.0125,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             line.original,
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.white,
-              fontSize: 17,
+              fontSize: screenWidth * _originalFontRatio,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -90,9 +101,9 @@ class _StaticLyricRow extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               line.phonetic!,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white70,
-                fontSize: 14,
+                fontSize: screenWidth * _tierFontRatio,
                 fontStyle: FontStyle.italic,
               ),
             ),
@@ -101,7 +112,10 @@ class _StaticLyricRow extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               line.translation!,
-              style: const TextStyle(color: Colors.white54, fontSize: 14),
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: screenWidth * _tierFontRatio,
+              ),
             ),
           ],
         ],

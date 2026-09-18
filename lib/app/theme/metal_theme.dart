@@ -120,9 +120,16 @@ class MetalButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final IconData? icon;
 
+  // Same 360dp-reference ratio pattern used across the app's other screens (icons, wordmark,
+  // section headers) — scales this button's icon/label with the actual screen instead of
+  // staying a fixed dp/pt size on every device.
+  static const double _iconRatio = 0.05; // 18/360
+  static const double _labelRatio = 0.0444; // 16/360
+
   @override
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
+    final screenWidth = MediaQuery.of(context).size.width;
     return Material(
       color: Colors.transparent,
       borderRadius: BorderRadius.circular(12),
@@ -144,7 +151,7 @@ class MetalButton extends StatelessWidget {
               if (icon != null) ...[
                 Icon(
                   icon,
-                  size: 18,
+                  size: screenWidth * _iconRatio,
                   color: enabled
                       ? MetalTheme.steelBright
                       : MetalTheme.textMuted,
@@ -157,6 +164,7 @@ class MetalButton extends StatelessWidget {
                   color: enabled
                       ? MetalTheme.textPrimary
                       : MetalTheme.textMuted,
+                  fontSize: screenWidth * _labelRatio,
                   fontWeight: FontWeight.w600,
                   letterSpacing: 0.3,
                 ),
