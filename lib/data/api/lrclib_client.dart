@@ -69,7 +69,16 @@ class LrclibClient {
     final candidates = _titleCandidates(trackName, artistName);
     final searched = await _searchBestAcross(candidates, artistName, trackName, artistName, durationSeconds) ??
         (artistName.isNotEmpty
-            ? await _searchBestAcross(candidates, '', trackName, artistName, durationSeconds)
+            // The artist-scoped search above already came up empty, meaning LRCLIB itself
+            // found nothing resembling this artist — widening to a title-only query next is a
+            // last resort, and a bare title like "Pretender" collides with several completely
+            // unrelated songs by different artists. Without any corroborating artist-name
+            // evidence here, the dominant title-match weight in _matchScore would otherwise
+            // just pick whichever unrelated artist's name happens to share a few more letters
+            // with the real one — pure noise, not a real signal — so this fallback demands a
+            // minimum artist similarity before trusting a title-only hit.
+            ? await _searchBestAcross(candidates, '', trackName, artistName, durationSeconds,
+                minArtistSimilarity: 0.3)
             : null);
 
     if (searched != null && searched.hasSyncedLyrics) return searched;
@@ -109,8 +118,9 @@ class LrclibClient {
     String queryArtist,
     String originalTrackName,
     String scoringArtist,
-    int? durationSeconds,
-  ) async {
+    int? durationSeconds, {
+    double minArtistSimilarity = 0.0,
+  }) async {
     Map<String, dynamic>? best;
     var bestScore = 0.0;
     for (final candidate in titleCandidates) {
@@ -121,6 +131,10 @@ class LrclibClient {
         // song, just the wrong lyrics field), so this has to disqualify it outright instead of
         // trusting the score to sort it out.
         if (_isRomanizedMismatch(entry, originalTrackName, scoringArtist)) continue;
+        if (scoringArtist.isNotEmpty && minArtistSimilarity > 0) {
+          final artistSim = _artistSimilarity(scoringArtist, (entry['artistName'] as String?) ?? '');
+          if (artistSim < minArtistSimilarity) continue;
+        }
         final score = _matchScore(candidate, scoringArtist, durationSeconds, entry);
         if (score > bestScore) {
           bestScore = score;
@@ -205,7 +219,7 @@ class LrclibClient {
 
   double _matchScore(String trackName, String artistName, int? durationSeconds, Map<String, dynamic> result) {
     final titleScore = _similarity(trackName, (result['trackName'] as String?) ?? '');
-    final artistScore = artistName.isEmpty ? 1.0 : _similarity(artistName, (result['artistName'] as String?) ?? '');
+    final artistScore = artistName.isEmpty ? 1.0 : _artistSimilarity(artistName, (result['artistName'] as String?) ?? '');
     var score = titleScore * 0.65 + artistScore * 0.35;
     if (durationSeconds != null) {
       final resultDuration = (result['duration'] as num?)?.toInt();
@@ -230,6 +244,28 @@ class LrclibClient {
       score += 0.03;
     }
     return score;
+  }
+
+  static final RegExp _tokenPattern = RegExp(r'[\p{L}\p{N}]+', unicode: true);
+
+  // Plain character-level similarity penalizes word-order swaps and added/dropped words
+  // harshly (e.g. "Kenshi Yonezu" vs "Yonezu Kenshi", or "IU" vs "IU (아이유)") even though
+  // those are the *same* artist. Comparing as a bag of words instead catches those directly.
+  double _tokenSimilarity(String a, String b) {
+    final tokensA = _tokenPattern.allMatches(a.toLowerCase()).map((m) => m.group(0)!).toSet();
+    final tokensB = _tokenPattern.allMatches(b.toLowerCase()).map((m) => m.group(0)!).toSet();
+    if (tokensA.isEmpty || tokensB.isEmpty) return 0;
+    final intersection = tokensA.intersection(tokensB).length;
+    final union = tokensA.union(tokensB).length;
+    return intersection / union;
+  }
+
+  /// The better of character-level and token-level similarity — takes whichever signal
+  /// recognizes the two names as the same artist.
+  double _artistSimilarity(String a, String b) {
+    final charSim = _similarity(a, b);
+    final tokenSim = _tokenSimilarity(a, b);
+    return charSim > tokenSim ? charSim : tokenSim;
   }
 
   /// 1 - normalized Levenshtein distance, case/whitespace-insensitive.
