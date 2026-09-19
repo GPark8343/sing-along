@@ -82,6 +82,14 @@ class _OverlayRootState extends State<OverlayRoot> {
   // when true, treated exactly like a song with no sync data at all: no auto-advance, manual
   // left/right tap navigation instead.
   bool _syncDisabledByUser = false;
+  // A manual correction for a synced song whose LRC timing doesn't quite line up with what's
+  // actually playing (common enough with fan-submitted LRCLIB timestamps) — added to the real
+  // position before comparing against each line's timestamp, so a positive value makes lines
+  // advance *earlier* (use this when the lyrics are lagging behind the audio) and a negative
+  // one delays them (use this when lines are appearing too early). Session-only: resets on a
+  // track change rather than persisting, since a drift correction for one song's timing has no
+  // reason to carry over to a completely different one.
+  int _syncOffsetMs = 0;
 
   @override
   void initState() {
@@ -156,6 +164,7 @@ class _OverlayRootState extends State<OverlayRoot> {
       if (isGenuinelyNewTrack) {
         _positionMs = null;
         _currentIndex = 0;
+        _syncOffsetMs = 0;
       } else {
         _recomputeCurrentIndex();
       }
@@ -196,15 +205,23 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   void _recomputeCurrentIndex() {
     if (!_isSynced || _positionMs == null) return;
+    final adjustedPositionMs = _positionMs! + _syncOffsetMs;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
-      if (_lines[i].timestampMs! <= _positionMs!) {
+      if (_lines[i].timestampMs! <= adjustedPositionMs) {
         index = i;
       } else {
         break;
       }
     }
     _currentIndex = index;
+  }
+
+  void _adjustSyncOffset(int deltaMs) {
+    setState(() {
+      _syncOffsetMs += deltaMs;
+      _recomputeCurrentIndex();
+    });
   }
 
   void _requestExpand() {
@@ -271,53 +288,99 @@ class _OverlayRootState extends State<OverlayRoot> {
                           height: cardHeight * _topBarRatio,
                           child: Row(
                             children: [
-                              const SizedBox(width: 12),
-                              if (_fromCache && _lines.isNotEmpty) ...[
-                                const SizedBox(width: 8),
-                                const Icon(
-                                  Icons.bookmark,
-                                  color: Colors.amberAccent,
-                                  size: 14,
-                                ),
-                                const SizedBox(width: 2),
-                                const Text(
-                                  '저장됨',
-                                  style: TextStyle(
-                                    color: Colors.amberAccent,
-                                    fontSize: 11,
+                              const SizedBox(width: 4),
+                              // Each badge carries its own symmetric horizontal padding now
+                              // (rather than a one-sided gap only before it) so the spacing
+                              // around it stays even regardless of which neighboring badges
+                              // happen to be showing.
+                              if (_fromCache && _lines.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 4,
                                   ),
-                                ),
-                              ],
-                              if (_lines.isNotEmpty) ...[
-                                const SizedBox(width: 8),
-                                Tooltip(
-                                  message: _isSynced
-                                      ? '싱크됨 — 자동으로 넘어감'
-                                      : '싱크 없음 — 눌러서 전체화면으로 보기',
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Icon(
-                                        _isSynced
-                                            ? Icons.sync
-                                            : Icons.sync_disabled,
-                                        color: _isSynced
-                                            ? Colors.lightGreenAccent
-                                            : Colors.orangeAccent,
+                                      const Icon(
+                                        Icons.bookmark,
+                                        color: Colors.amberAccent,
                                         size: 14,
                                       ),
                                       const SizedBox(width: 2),
-                                      Text(
-                                        _isSynced ? '동기화' : '비동기화',
+                                      const Text(
+                                        '저장됨',
                                         style: TextStyle(
-                                          color: _isSynced
-                                              ? Colors.lightGreenAccent
-                                              : Colors.orangeAccent,
+                                          color: Colors.amberAccent,
                                           fontSize: 11,
                                         ),
                                       ),
                                     ],
                                   ),
+                                ),
+                              if (_lines.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 4,
+                                  ),
+                                  child: Tooltip(
+                                    message: _isSynced
+                                        ? '싱크됨 — 자동으로 넘어감'
+                                        : '싱크 없음 — 눌러서 전체화면으로 보기',
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _isSynced
+                                              ? Icons.sync
+                                              : Icons.sync_disabled,
+                                          color: _isSynced
+                                              ? Colors.lightGreenAccent
+                                              : Colors.orangeAccent,
+                                          size: 14,
+                                        ),
+                                        const SizedBox(width: 2),
+                                        Text(
+                                          _isSynced ? '동기화' : '비동기화',
+                                          style: TextStyle(
+                                            color: _isSynced
+                                                ? Colors.lightGreenAccent
+                                                : Colors.orangeAccent,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              // Only meaningful for a song that's actually auto-advancing —
+                              // there's no "timing" to correct for unsynced/manual-navigation
+                              // lyrics, so this stays hidden rather than sitting there doing
+                              // nothing.
+                              if (_isSynced) ...[
+                                _SyncOffsetButton(
+                                  icon: Icons.remove,
+                                  tooltip: '가사를 조금 늦게 (-0.5초)',
+                                  onPressed: () => _adjustSyncOffset(-500),
+                                ),
+                                // Always shown, not just once it's nonzero — a fixed width
+                                // keeps the +/- buttons from visually shifting left/right as
+                                // the digit count changes between taps (e.g. "0.0s" vs
+                                // "-1.5s" vs "+10.0s").
+                                SizedBox(
+                                  width: 26,
+                                  child: Text(
+                                    '${_syncOffsetMs > 0 ? '+' : ''}${(_syncOffsetMs / 1000).toStringAsFixed(1)}s',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 9,
+                                    ),
+                                  ),
+                                ),
+                                _SyncOffsetButton(
+                                  icon: Icons.add,
+                                  tooltip: '가사를 조금 빠르게 (+0.5초)',
+                                  onPressed: () => _adjustSyncOffset(500),
                                 ),
                               ],
                               const Spacer(),
@@ -544,5 +607,37 @@ class _OverlayRootState extends State<OverlayRoot> {
     final minutes = totalSeconds ~/ 60;
     final seconds = totalSeconds % 60;
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+}
+
+// A smaller tap target than the top bar's expand/close buttons (26dp instead of 44dp) —
+// deliberate, not an oversight: this row already has to fit a badge, a sync label, both of
+// these, an always-visible offset readout, and two full-size icon buttons, and unlike
+// expand/close (one deliberate tap) these are meant to be tapped repeatedly to dial in an
+// offset, where a smaller target is an acceptable trade for not overflowing the row on a
+// compact card.
+class _SyncOffsetButton extends StatelessWidget {
+  const _SyncOffsetButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: IconButton(
+        iconSize: 14,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+        icon: Icon(icon, color: Colors.white70),
+        onPressed: onPressed,
+      ),
+    );
   }
 }

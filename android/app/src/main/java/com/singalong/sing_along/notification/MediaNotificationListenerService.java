@@ -8,7 +8,10 @@ import android.media.session.PlaybackState;
 import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Zero-cost "now playing" detector: instead of listening to the microphone, this reads the
@@ -34,6 +37,20 @@ public class MediaNotificationListenerService extends NotificationListenerServic
 
         @Override
         public void onPlaybackStateChanged(PlaybackState state) {
+            if (state != null && state.getState() != PlaybackState.STATE_PLAYING) {
+                // This controller just stopped actively playing (paused, buffering, ...) —
+                // pausing one app to go play something in a *different* app (e.g. switching
+                // from YouTube Music to Spotify) doesn't reliably fire
+                // OnActiveSessionsChangedListener, since the set of active sessions often
+                // doesn't actually change — both apps' sessions already existed, only which
+                // one is truly playing did. Re-running the full scan here is what catches
+                // that handoff instead of leaving this now-paused controller tracked forever.
+                // attachController() no-ops if the scan picks this same controller back (by
+                // session token), so the publish below is what still reflects its new paused
+                // state in that case — without it, the last-published *playing* position
+                // would otherwise be left stuck on screen.
+                pickActiveSession();
+            }
             if (activeController != null) {
                 publishFrom(activeController, activeController.getMetadata());
             }
@@ -77,6 +94,14 @@ public class MediaNotificationListenerService extends NotificationListenerServic
         super.onListenerDisconnected();
     }
 
+    // The main YouTube app is general video, not music — a random video someone's watching has
+    // no business triggering a lyrics fetch/overlay the way an actual song does. Dedicated
+    // music apps (YouTube Music included) aren't affected: this only excludes this one video
+    // app's package, not "any session that happens to be playing a video".
+    private static final Set<String> BLOCKED_PACKAGES = new HashSet<>(Arrays.asList(
+            "com.google.android.youtube"
+    ));
+
     private void pickActiveSession() {
         if (sessionManager == null) return;
         ComponentName listenerComponent = new ComponentName(this, MediaNotificationListenerService.class);
@@ -87,15 +112,18 @@ public class MediaNotificationListenerService extends NotificationListenerServic
             return;
         }
         MediaController next = null;
+        MediaController firstEligible = null;
         for (MediaController controller : controllers) {
+            if (BLOCKED_PACKAGES.contains(controller.getPackageName())) continue;
+            if (firstEligible == null) firstEligible = controller;
             PlaybackState state = controller.getPlaybackState();
             if (state != null && state.getState() == PlaybackState.STATE_PLAYING) {
                 next = controller;
                 break;
             }
         }
-        if (next == null && !controllers.isEmpty()) {
-            next = controllers.get(0);
+        if (next == null) {
+            next = firstEligible;
         }
         attachController(next);
     }

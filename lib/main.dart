@@ -6,6 +6,7 @@ import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import 'app/lyrics/full_screen_lyrics_page.dart';
 import 'app/lyrics/saved_lyrics_view_page.dart';
+import 'app/lyrics/saved_songs_list_page.dart';
 import 'app/onboarding/permission_screen.dart';
 import 'app/theme/metal_theme.dart';
 import 'core/platform/notification_bridge.dart';
@@ -772,6 +773,66 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 12),
                 _buildSongSearchField(context),
+                const SizedBox(height: 10),
+                Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(10),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: widget.boxes.recentSongs.isEmpty
+                        ? null
+                        : () => Navigator.of(context).push(
+                              _fadeThroughRoute(
+                                SavedSongsListPage(
+                                  songs: _recentSongsSorted(),
+                                  onOpen: _openSavedLyrics,
+                                ),
+                              ),
+                            ),
+                    // At least a 48dp-tall tap target (Android's own minimum touch target
+                    // guideline) — the plain underlined text this replaced measured barely
+                    // more than the text glyphs themselves, too small and fiddly to tap
+                    // reliably.
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 12,
+                        horizontal: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: MetalTheme.edgeHighlight,
+                          width: 0.6,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.library_music_outlined,
+                            color: MetalTheme.steel,
+                            size: screenWidth * sectionIconRatio,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '총 ${widget.boxes.recentSongs.length}곡 저장됨',
+                              style: TextStyle(
+                                color: MetalTheme.textSecondary,
+                                fontSize: screenWidth * statusTextRatio * 1.15,
+                              ),
+                            ),
+                          ),
+                          Icon(
+                            Icons.chevron_right,
+                            color: MetalTheme.steel,
+                            size: screenWidth * sectionIconRatio,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
                 if (_songSearchQuery.trim().isNotEmpty)
                   ..._buildSearchResultsSection(context)
                 else
@@ -859,21 +920,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           color: MetalTheme.textMuted,
           fontSize: screenWidth * textRatio,
         ),
-        prefixIcon: Icon(
-          Icons.search,
-          color: MetalTheme.steel,
-          size: screenWidth * iconRatio,
-        ),
-        suffixIcon: _songSearchQuery.isEmpty
-            ? null
+        // The close button takes over this left slot whenever the keyboard is up, not just
+        // once there's text — otherwise a tap that focuses the field but hasn't typed
+        // anything yet leaves no way to back out short of the system back button/gesture,
+        // which the keyboard can make awkward to reach depending on the device's navigation
+        // mode. Driven by keyboard visibility rather than the field's own focus state for the
+        // same reason the card-collapse above is: the system back button/gesture can hide the
+        // IME without clearing Flutter's focus, which would otherwise leave this stuck
+        // visible forever.
+        prefixIcon:
+            (_songSearchQuery.isEmpty &&
+                MediaQuery.of(context).viewInsets.bottom == 0)
+            ? Icon(
+                Icons.search,
+                color: MetalTheme.steel,
+                size: screenWidth * iconRatio,
+              )
             : IconButton(
                 icon: Icon(
-                  Icons.clear,
+                  Icons.close,
                   color: MetalTheme.textMuted,
                   size: screenWidth * iconRatio,
                 ),
                 onPressed: () {
                   _songSearchController.clear();
+                  _songSearchFocusNode.unfocus();
                   setState(() => _songSearchQuery = '');
                 },
               ),

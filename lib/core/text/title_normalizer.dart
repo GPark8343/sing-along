@@ -42,6 +42,23 @@ class TitleNormalizer {
     return result.isEmpty ? title.trim() : result;
   }
 
+  // Deliberately broader than _liveMarkerPattern above (which only matches "live" in the
+  // specific trailing/bracketed positions worth stripping for a clean LRCLIB query) — this
+  // just needs "live" to appear as its own word anywhere in the title, e.g. "[Official Live
+  // Video at ...]" doesn't start with "live" so _liveMarkerPattern's bracket alternative
+  // misses it, but this catches it fine. The tradeoff is a song genuinely titled with the
+  // word "live" (e.g. "Live Forever") gets flagged too — losing the sync toggle on a studio
+  // track is a minor cosmetic cost next to actually mis-syncing a real live performance.
+  static final RegExp _liveWordPattern = RegExp(r'\blive\b', caseSensitive: false);
+
+  /// Whether the *raw*, un-normalized title marks this as a live performance — checked
+  /// against the original title (normalizeTitle() strips the narrower live marker before
+  /// querying LRCLIB, so by the time a query is built there's nothing left here to detect).
+  /// Used to force whatever lyrics come back to display unsynced: LRCLIB essentially never
+  /// has a separately-timed live submission, so any synced timestamps it returns are the
+  /// studio recording's timing, which won't track a live performance's actual pacing.
+  static bool isLiveTitle(String title) => _liveWordPattern.hasMatch(title);
+
   static final RegExp _topicSuffix = RegExp(r'\s*-\s*topic$', caseSensitive: false);
   static final RegExp _vevoSuffix = RegExp(r'\s*vevo$', caseSensitive: false);
   static final RegExp _multiArtistSplit = RegExp(r'\s*(?:,|&|/| x | X |feat\.?|ft\.?|featuring)\s*');

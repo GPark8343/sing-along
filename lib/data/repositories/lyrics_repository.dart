@@ -2,6 +2,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../../core/text/japanese_detector.dart';
 import '../../core/text/lrc_parser.dart';
+import '../../core/text/spanish_detector.dart';
+import '../../core/text/spanish_hangul.dart';
 import '../../core/text/title_normalizer.dart';
 import '../api/deepl_client.dart';
 import '../api/lrclib_client.dart';
@@ -141,11 +143,36 @@ class LyricsRepository {
     required String artist,
     int? durationSeconds,
   }) async {
-    final lrclib = await _lrclibClient.fetchLyrics(
-      trackName: TitleNormalizer.normalizeTitle(title),
-      artistName: TitleNormalizer.primaryArtist(artist),
-      durationSeconds: durationSeconds,
-    );
+    final artistName = TitleNormalizer.primaryArtist(artist);
+    final isLive = TitleNormalizer.isLiveTitle(title);
+
+    LrclibLyrics? lrclib;
+    var forceUnsynced = false;
+
+    if (isLive) {
+      // Try the literal, un-stripped title first — on the rare chance LRCLIB has a
+      // dedicated submission specifically for this live performance, correctly timed to it,
+      // it's worth a look before falling back to the studio recording.
+      lrclib = await _lrclibClient.fetchLyrics(
+        trackName: title,
+        artistName: artistName,
+        durationSeconds: durationSeconds,
+      );
+    }
+
+    if (lrclib == null || !lrclib.hasLyrics) {
+      lrclib = await _lrclibClient.fetchLyrics(
+        trackName: TitleNormalizer.normalizeTitle(title),
+        artistName: artistName,
+        durationSeconds: durationSeconds,
+      );
+      // Whatever came back here is, at best, the studio recording's timing — a live
+      // performance's actual pacing (extended intros, ad-libs, crowd noise, tempo drift)
+      // never matches that, so this has to be shown unsynced (manual read-along) rather than
+      // auto-scrolling to a beat that isn't the one actually playing.
+      if (isLive) forceUnsynced = true;
+    }
+
     if (lrclib == null || !lrclib.hasLyrics) return LyricsResult.notFound;
 
     final parsedLines = LrcParser.parse(lrclib.plainLyrics, lrclib.syncedLyrics);
@@ -153,29 +180,79 @@ class LyricsRepository {
 
     return _buildResult(
       parsedLines.map((line) => line.text).toList(),
-      parsedLines.map((line) => line.timestampMs).toList(),
+      forceUnsynced
+          ? List<int?>.filled(parsedLines.length, null)
+          : parsedLines.map((line) => line.timestampMs).toList(),
     );
   }
 
-  // Shared by both a fresh LRCLIB fetch and a user-pasted paste-in: runs the same on-device
-  // Japanese reading + DeepL translation pipeline over whatever original-language lines it's
-  // handed, whether they came with LRC timestamps or not.
+  // Shared by both a fresh LRCLIB fetch and a user-pasted paste-in: runs the on-device
+  // phonetic reading (Japanese via Kuromoji, Spanish via rule-based transliteration) + DeepL
+  // translation pipeline over whatever original-language lines it's handed, whether they came
+  // with LRC timestamps or not.
   Future<LyricsResult> _buildResult(List<String> originalTexts, List<int?> timestamps) async {
-    final isJapanese = originalTexts.any(JapaneseDetector.isJapanese);
+    // Classified one line at a time, not once for the whole song — a song can freely mix
+    // Japanese/Spanish/English/other lines, and each only gets the phonetic tier that's
+    // actually right for its own language (an English line gets none at all, the same way a
+    // Korean reader doesn't need a 독음 for text they can already read as-is). Judging the
+    // whole song as a single language was what previously let a handful of Spanish lines drag
+    // an otherwise-English song's *entire* lyrics through the Spanish phonetic pipeline.
+    final japaneseIndices = <int>[];
+    final spanishIndices = <int>[];
+    // Lines too short to independently tell apart from English — most commonly a repeated
+    // one-word chorus/hook line (a whole song built around "Despacito" on its own has no
+    // second word for isSpanish()'s 2-hit stopword bar to ever reach) — collected separately
+    // and only promoted to Spanish below if the rest of the song already leans confidently
+    // Spanish, rather than trusted on their own.
+    final maybeSpanishIndices = <int>[];
+    for (var i = 0; i < originalTexts.length; i++) {
+      final text = originalTexts[i];
+      if (JapaneseDetector.isJapanese(text)) {
+        japaneseIndices.add(i);
+      } else if (SpanishDetector.isSpanish(text)) {
+        spanishIndices.add(i);
+      } else if (SpanishDetector.isMaybeSpanish(text)) {
+        maybeSpanishIndices.add(i);
+      }
+    }
+    final confidentNonJapaneseCount = originalTexts.length - japaneseIndices.length;
+    if (confidentNonJapaneseCount > 0 &&
+        spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
+      spanishIndices.addAll(maybeSpanishIndices);
+    }
+
+    Future<List<String>?> fetchJapaneseReadings() {
+      if (japaneseIndices.isEmpty) return Future.value(null);
+      return _phoneticClient.readingsForLines([
+        for (final i in japaneseIndices) originalTexts[i],
+      ]);
+    }
 
     final results = await Future.wait([
-      isJapanese ? _phoneticClient.readingsForLines(originalTexts) : Future.value(null),
+      fetchJapaneseReadings(),
       _deepLClient.translateLines(originalTexts),
     ]);
-    final readings = results[0];
+    final japaneseReadings = results[0];
     final translations = results[1];
+
+    final readings = List<String?>.filled(originalTexts.length, null);
+    if (japaneseReadings != null) {
+      for (var k = 0; k < japaneseIndices.length && k < japaneseReadings.length; k++) {
+        readings[japaneseIndices[k]] = japaneseReadings[k];
+      }
+    }
+    // Synchronous/local, so no need to batch this through Future.wait above the way the
+    // native Japanese reading call is.
+    for (final i in spanishIndices) {
+      readings[i] = SpanishHangul.transliterateLine(originalTexts[i]);
+    }
 
     final lines = <LyricsLine>[
       for (var i = 0; i < originalTexts.length; i++)
         LyricsLine(
           timestampMs: i < timestamps.length ? timestamps[i] : null,
           original: originalTexts[i],
-          phonetic: _nonEmpty(readings != null ? readings[i] : null),
+          phonetic: _nonEmpty(readings[i]),
           translation: _nonEmpty(translations != null ? translations[i] : null),
         ),
     ];

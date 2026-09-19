@@ -142,9 +142,32 @@ public final class KanaHangul {
                 consumed = 1;
             }
             String hangul = KanaHangulTables.TABLE.get(mora);
-            out.append(hangul != null ? hangul : mora);
+            if (hangul != null) {
+                out.append(hangul);
+            } else if (!(mora.length() == 1 && isHanCharacter(mora.charAt(0)))) {
+                // Kept as-is: an unmapped kana (incomplete table coverage) still reads as
+                // Japanese, and a stray ASCII/Latin word embedded in the line is already
+                // readable verbatim — neither needs to be dropped just because it has no
+                // Hangul mapping.
+                out.append(mora);
+            }
+            // Omitted: a kanji character lands here when kuromoji couldn't produce a reading
+            // for its token and JapaneseReadingHandler fell back to the raw surface text (see
+            // readingOf() there) — appending that unconverted kanji would leak untranslated Han
+            // characters into what's supposed to be a Korean phonetic reading, reading as
+            // stray Chinese text to anyone who can't tell kanji from hanzi at a glance. Omitting
+            // it from this line is more honest than showing something wrong.
             i += consumed;
         }
+    }
+
+    // CJK Unified Ideographs (kanji) — deliberately not "any non-Latin script", since kana
+    // (already handled above) and full-width punctuation/symbols that can show up in lyrics
+    // should still pass through unchanged; this only needs to catch actual kanji.
+    private static boolean isHanCharacter(char c) {
+        return (c >= 0x4E00 && c <= 0x9FFF) // CJK Unified Ideographs
+                || (c >= 0x3400 && c <= 0x4DBF) // CJK Extension A
+                || (c >= 0xF900 && c <= 0xFAFF); // CJK Compatibility Ideographs
     }
 
     // Small kana that can combine with a preceding consonant kana into one two-character mora:

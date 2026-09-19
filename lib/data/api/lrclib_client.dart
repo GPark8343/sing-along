@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import '../../core/text/japanese_detector.dart';
+
 /// Raw lyrics as returned by LRCLIB — no auth/rate limit, so no key handling
 /// needed for this leg of the pipeline (unlike Goo Lab/DeepL later).
 class LrclibLyrics {
@@ -113,6 +115,11 @@ class LrclibClient {
     for (final candidate in titleCandidates) {
       final result = await _search(candidate, queryArtist);
       for (final entry in result) {
+        // Skip rather than let a low score naturally lose — a romanized-lyrics submission of
+        // the *right* song can still score highest on title/artist similarity (it's the same
+        // song, just the wrong lyrics field), so this has to disqualify it outright instead of
+        // trusting the score to sort it out.
+        if (_isRomanizedMismatch(entry, scoringArtist)) continue;
         final score = _matchScore(candidate, scoringArtist, durationSeconds, entry);
         if (score > bestScore) {
           bestScore = score;
@@ -135,11 +142,48 @@ class LrclibClient {
         'artist_name': artistName,
         'duration': ?durationSeconds,
       });
-      return _parse(response.data!);
+      final data = response.data!;
+      if (_isRomanizedMismatch(data, artistName)) return null;
+      return _parse(data);
     } on DioException catch (e) {
       if (e.response?.statusCode == 404) return null;
       return null; // network/timeout — treat as "not found for now", not fatal
     }
+  }
+
+  // LRCLIB occasionally has a submission where the lyrics text is a romanized (romaji)
+  // transcription instead of the real target-language script — most visibly for Japanese
+  // songs. That's a different (wrong) submission, not a language choice this app should just
+  // accept: scrolling English-letter "pronunciation" as the 원문 defeats the whole point of
+  // the 원문/독음 split (and JapaneseDetector.isJapanese never sees any kana to trigger the
+  // 독음 tier on, so it would otherwise silently degrade to 2-tier with the wrong original).
+  // Three independent signals, any one enough to reject the candidate:
+  //  1. Self-consistency — the record's own trackName/artistName are in Japanese (kana), but
+  //     its lyrics field isn't. Needs no assumption about what script the *query* used.
+  //  2. Content shape — some submissions are romanized end-to-end (trackName/artistName *and*
+  //     lyrics all in Latin script, e.g. Kenshi Yonezu's "Lemon"), where (1) has nothing to
+  //     compare against — JapaneseDetector.looksLikeRomanizedJapanese catches those directly
+  //     from the lyrics text's own phonetic shape instead.
+  //  3. Artist name shape — some songs give (1) and (2) nothing to work with either, because
+  //     even the *query* artist is already fully romanized with no distinctive Japanese
+  //     particles in the lyrics for (2) to catch (e.g. HIMEHINA's "Lemonade", whose lyrics are
+  //     genuinely almost all English). JapaneseDetector.looksLikeJapaneseName(queryArtist)
+  //     catches those from the artist name's own phonetic shape instead of the lyrics.
+  bool _isRomanizedMismatch(Map<String, dynamic> result, String queryArtist) {
+    final syncedLyrics = result['syncedLyrics'] as String?;
+    final lyrics = (syncedLyrics?.trim().isNotEmpty ?? false)
+        ? syncedLyrics!
+        : (result['plainLyrics'] as String? ?? '');
+    if (lyrics.trim().isEmpty || JapaneseDetector.isJapanese(lyrics)) {
+      return false; // empty, or already has real kana — nothing to flag
+    }
+    final recordTitle = (result['trackName'] as String?) ?? '';
+    final recordArtist = (result['artistName'] as String?) ?? '';
+    final recordIsJapanese =
+        JapaneseDetector.isJapanese(recordTitle) || JapaneseDetector.isJapanese(recordArtist);
+    return recordIsJapanese ||
+        JapaneseDetector.looksLikeRomanizedJapanese(lyrics) ||
+        JapaneseDetector.looksLikeJapaneseName(queryArtist);
   }
 
   Future<List<Map<String, dynamic>>> _search(String trackName, String artistName) async {
