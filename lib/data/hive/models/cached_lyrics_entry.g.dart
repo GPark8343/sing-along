@@ -21,13 +21,14 @@ class CachedLyricsEntryAdapter extends TypeAdapter<CachedLyricsEntry> {
       lines: (fields[1] as List).cast<CachedLyricLine>(),
       cachedAt: fields[2] as DateTime,
       isUserPasted: fields[3] == null ? false : fields[3] as bool,
+      syncOffsetMs: fields[4] == null ? 0 : fields[4] as int,
     );
   }
 
   @override
   void write(BinaryWriter writer, CachedLyricsEntry obj) {
     writer
-      ..writeByte(4)
+      ..writeByte(5)
       ..writeByte(0)
       ..write(obj.found)
       ..writeByte(1)
@@ -35,7 +36,9 @@ class CachedLyricsEntryAdapter extends TypeAdapter<CachedLyricsEntry> {
       ..writeByte(2)
       ..write(obj.cachedAt)
       ..writeByte(3)
-      ..write(obj.isUserPasted);
+      ..write(obj.isUserPasted)
+      ..writeByte(4)
+      ..write(obj.syncOffsetMs);
   }
 
   @override

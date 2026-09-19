@@ -21,11 +21,18 @@ class CachedLyricsEntry {
   // never user-pasted.
   @HiveField(3, defaultValue: false)
   final bool isUserPasted;
+  // The user's manual sync correction (see overlay_main.dart/full_screen_lyrics_page.dart),
+  // remembered per song so it doesn't need to be re-applied every time the same song plays
+  // again — most useful for live recordings, where LRCLIB's timing routinely needs a fixed
+  // correction against a particular performance's intro/silence length.
+  @HiveField(4, defaultValue: 0)
+  final int syncOffsetMs;
 
   const CachedLyricsEntry({
     required this.found,
     required this.lines,
     required this.cachedAt,
     this.isUserPasted = false,
+    this.syncOffsetMs = 0,
   });
 }

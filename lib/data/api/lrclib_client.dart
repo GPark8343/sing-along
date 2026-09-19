@@ -87,6 +87,57 @@ class LrclibClient {
     return exact ?? searched;
   }
 
+  // A last-resort fallback for when the exact recording has no LRCLIB entry of its own at
+  // all — only a differently-arranged version does (e.g. the studio single "Leo" has nothing,
+  // but "Leo -Orchestral Arrangement Version-" does). fetchLyrics() already tried and failed
+  // to find a confident match by this point; this is deliberately much looser — it only
+  // requires the candidate's title to literally start with the query title (so it can't drift
+  // onto a wholly unrelated song sharing a few letters) plus a confident artist match — since
+  // the caller always discards whatever timing comes back and shows the text unsynced. A
+  // different arrangement's line-by-line wording can also differ (an extended intro, a spoken
+  // interlude), but that's still a far more useful starting point than nothing at all.
+  Future<LrclibLyrics?> fetchLooseLyrics({
+    required String trackName,
+    required String artistName,
+  }) async {
+    if (artistName.isEmpty) return null;
+    final candidates = _titleCandidates(trackName, artistName);
+    Map<String, dynamic>? best;
+    for (final candidate in candidates) {
+      // Checked against *this* candidate specifically, not the original combined trackName —
+      // a bilingual title like "レオ - Leo" needs to compare against its own "Leo" half, since
+      // no LRCLIB entry's title will ever start with the whole untouched original string.
+      final normalizedCandidate = candidate.trim().toLowerCase();
+      if (normalizedCandidate.isEmpty) continue;
+      final results = await _search(candidate, artistName);
+      for (final entry in results) {
+        final entryTitle = ((entry['trackName'] as String?) ?? '').trim().toLowerCase();
+        if (!_isTitleVariantOf(normalizedCandidate, entryTitle)) continue;
+        final entryArtist = (entry['artistName'] as String?) ?? '';
+        if (_artistSimilarity(artistName, entryArtist) < 0.7) continue;
+        if (_isRomanizedMismatch(entry, trackName, artistName)) continue;
+        // Among ties, prefer whichever title is closest to the query (shortest match) —
+        // e.g. an "-Acoustic Version-" over an "-Orchestral Arrangement, Live at Budokan-".
+        final bestTitle = best == null ? null : ((best['trackName'] as String?) ?? '').trim().toLowerCase();
+        if (best == null || entryTitle.length < (bestTitle?.length ?? 0)) {
+          best = entry;
+        }
+      }
+    }
+    return best == null ? null : _parse(best);
+  }
+
+  // True when `candidateTitle` is the query title with something appended after a word
+  // boundary (a space, hyphen, bracket, ...) — "leo -orchestral arrangement version-" counts
+  // for query "leo", but "leon" doesn't, and neither does an unrelated title that merely
+  // contains the query as a substring in the middle.
+  bool _isTitleVariantOf(String queryTitle, String candidateTitle) {
+    if (candidateTitle.isEmpty || !candidateTitle.startsWith(queryTitle)) return false;
+    if (candidateTitle.length == queryTitle.length) return false; // identical — not a "variant"
+    final nextChar = candidateTitle[queryTitle.length];
+    return !RegExp(r'[a-z0-9]').hasMatch(nextChar);
+  }
+
   // A YouTube-style "Artist - Title" notification title, once normalized, still splits into
   // ["Artist", "Title"] here — searching LRCLIB with the artist fragment AS a title candidate
   // is worse than just skipping it: LRCLIB submissions often carry that same "Artist - Title"

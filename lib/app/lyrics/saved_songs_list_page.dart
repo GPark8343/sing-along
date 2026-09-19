@@ -13,10 +13,15 @@ class SavedSongsListPage extends StatefulWidget {
     super.key,
     required this.songs,
     required this.onOpen,
+    required this.onDelete,
   });
 
   final List<RecentSongEntry> songs;
   final void Function(RecentSongEntry entry) onOpen;
+  // Removes the entry from both the recent-songs index and the lyrics cache it points at
+  // (see HomePage._deleteSavedSong) — awaited before this page drops it from its own local
+  // list, so a failed delete doesn't leave the row missing from the UI while still on disk.
+  final Future<void> Function(RecentSongEntry entry) onDelete;
 
   @override
   State<SavedSongsListPage> createState() => _SavedSongsListPageState();
@@ -25,6 +30,15 @@ class SavedSongsListPage extends StatefulWidget {
 class _SavedSongsListPageState extends State<SavedSongsListPage> {
   final TextEditingController _searchController = TextEditingController();
   String _query = '';
+  // A local copy so a delete can remove the row immediately without waiting on the parent
+  // route to rebuild this page with a fresh `widget.songs` list.
+  late List<RecentSongEntry> _songs;
+
+  @override
+  void initState() {
+    super.initState();
+    _songs = List.of(widget.songs);
+  }
 
   @override
   void dispose() {
@@ -34,14 +48,39 @@ class _SavedSongsListPageState extends State<SavedSongsListPage> {
 
   List<RecentSongEntry> get _filteredSongs {
     final needle = _query.trim().toLowerCase();
-    if (needle.isEmpty) return widget.songs;
-    return widget.songs
+    if (needle.isEmpty) return _songs;
+    return _songs
         .where(
           (entry) =>
               entry.title.toLowerCase().contains(needle) ||
               entry.artist.toLowerCase().contains(needle),
         )
         .toList();
+  }
+
+  Future<bool> _confirmDelete(RecentSongEntry entry) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: MetalTheme.surfaceDark,
+        title: const Text('저장된 곡 삭제', style: TextStyle(color: Colors.white)),
+        content: Text(
+          '"${entry.title}"${entry.artist.isEmpty ? '' : ' - ${entry.artist}'}을(를) 삭제할까요?\n저장된 가사도 함께 삭제되며 되돌릴 수 없어요.',
+          style: const TextStyle(color: MetalTheme.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   @override
@@ -55,7 +94,7 @@ class _SavedSongsListPageState extends State<SavedSongsListPage> {
         foregroundColor: Colors.white,
         elevation: 0,
         title: Text(
-          '저장된 곡 (${widget.songs.length})',
+          '저장된 곡 (${_songs.length})',
           style: TextStyle(
             color: Colors.white,
             fontSize: screenWidth * 0.05,
@@ -78,7 +117,7 @@ class _SavedSongsListPageState extends State<SavedSongsListPage> {
                 child: _buildSearchField(context),
               ),
               Expanded(
-                child: widget.songs.isEmpty
+                child: _songs.isEmpty
                     ? const Center(
                         child: Text(
                           '저장된 곡이 없습니다',
@@ -104,29 +143,47 @@ class _SavedSongsListPageState extends State<SavedSongsListPage> {
                             const SizedBox(height: 8),
                         itemBuilder: (context, index) {
                           final entry = filtered[index];
-                          return MetalCard(
-                            padding: EdgeInsets.zero,
-                            child: ListTile(
-                              title: Text(
-                                entry.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                          return Dismissible(
+                            key: ValueKey(entry.cacheKey),
+                            direction: DismissDirection.endToStart,
+                            background: Container(
+                              alignment: Alignment.centerRight,
+                              padding: const EdgeInsets.symmetric(horizontal: 20),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent.withValues(alpha: 0.85),
+                                borderRadius: BorderRadius.circular(12),
                               ),
-                              subtitle: entry.artist.isEmpty
-                                  ? null
-                                  : Text(
-                                      entry.artist,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: MetalTheme.textSecondary,
+                              child: const Icon(Icons.delete_outline, color: Colors.white),
+                            ),
+                            confirmDismiss: (_) => _confirmDelete(entry),
+                            onDismissed: (_) {
+                              setState(() => _songs.remove(entry));
+                              widget.onDelete(entry);
+                            },
+                            child: MetalCard(
+                              padding: EdgeInsets.zero,
+                              child: ListTile(
+                                title: Text(
+                                  entry.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: entry.artist.isEmpty
+                                    ? null
+                                    : Text(
+                                        entry.artist,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: MetalTheme.textSecondary,
+                                        ),
                                       ),
-                                    ),
-                              trailing: const Icon(
-                                Icons.chevron_right,
-                                color: MetalTheme.steel,
+                                trailing: const Icon(
+                                  Icons.chevron_right,
+                                  color: MetalTheme.steel,
+                                ),
+                                onTap: () => widget.onOpen(entry),
                               ),
-                              onTap: () => widget.onOpen(entry),
                             ),
                           );
                         },

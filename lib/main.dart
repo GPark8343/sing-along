@@ -333,6 +333,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return; // superseded — drop this result
     }
     _fetchedTrackKey = requestedTrackKey;
+    // Restores whatever correction was saved the last time this exact song played (0 for one
+    // that's never had one set) — overwrites the plain 0 reset above now that we actually know.
+    _syncOffsetMs = result.syncOffsetMs;
     if (mounted) setState(() => _lyricsStatus = _statusFor(result));
     await _applyLyricsResult(nowPlaying, result);
   }
@@ -436,6 +439,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return entries;
   }
 
+  // Removes both the recent-songs index entry and the lyrics cached under the same key — a
+  // wrong/duplicate match (e.g. a cover mis-attributed to the wrong artist, saved as a
+  // separate entry from the correct one) would otherwise sit in "저장된 곡" forever, since
+  // nothing else ever prunes this box on its own.
+  Future<void> _deleteSavedSong(RecentSongEntry entry) async {
+    await widget.boxes.recentSongs.delete(entry.cacheKey);
+    await widget.boxes.lyrics.delete(entry.cacheKey);
+    if (mounted) setState(() {});
+  }
+
   // Case-insensitive substring match on title (and artist, so searching "novelbright" finds
   // their songs too even if the query doesn't match any title) — across every song this device
   // has ever fetched lyrics for, not just the "최근 들은 곡" shortlist.
@@ -489,17 +502,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _setSyncOffset(int offsetMs) async {
     if (_syncOffsetMs == offsetMs) return;
     _syncOffsetMs = offsetMs;
+    await _persistSyncOffset(offsetMs);
     final payload = _lastLyricsPayload;
     if (payload == null) return;
     _lastLyricsPayload = {...payload, 'syncOffsetMs': offsetMs};
     await FlutterOverlayWindow.shareData(_lastLyricsPayload);
   }
 
+  // Shared by both directions (full-screen page's own buttons, and the overlay's relayed
+  // change below) — remembers the correction against whichever song is actually playing right
+  // now, so it comes back automatically the next time that song plays.
+  Future<void> _persistSyncOffset(int offsetMs) async {
+    final nowPlaying = _nowPlaying;
+    if (nowPlaying == null) return;
+    await _lyricsRepository.updateSyncOffset(
+      title: nowPlaying.title,
+      artist: nowPlaying.artist ?? '',
+      offsetMs: offsetMs,
+    );
+  }
+
   // The mirror image of _setSyncOffset — the small overlay's own +/- buttons changed the
   // offset instead, relayed here (the overlay can't reach the full-screen page directly) so
   // that page picks up the same value the next time it's opened for this song. No need to
   // shareData anything back out: the overlay that sent this already has the value locally.
-  void _onOverlaySyncOffsetChanged(Map event) {
+  Future<void> _onOverlaySyncOffsetChanged(Map event) async {
     final offsetMs = event['offsetMs'] as int?;
     if (offsetMs == null) return;
     // Guards against a message for a song that's since been skipped past landing after the
@@ -507,6 +534,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // check _onPosition uses for the overlay's own position pings.
     if (event['trackKey'] != _nowPlaying?.trackKey) return;
     _syncOffsetMs = offsetMs;
+    await _persistSyncOffset(offsetMs);
     final payload = _lastLyricsPayload;
     if (payload != null) {
       _lastLyricsPayload = {...payload, 'syncOffsetMs': offsetMs};
@@ -828,6 +856,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 SavedSongsListPage(
                                   songs: _recentSongsSorted(),
                                   onOpen: _openSavedLyrics,
+                                  onDelete: _deleteSavedSong,
                                 ),
                               ),
                             ),

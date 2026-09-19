@@ -38,12 +38,16 @@ class LyricsResult {
   // differently (it can't offer a paste UI itself, so it points the user at the full-screen
   // page instead of trying to render them).
   final bool isUserPasted;
+  // The manual sync correction remembered from the last time this song was played, or 0 for
+  // a song that's never had one set (including a brand new fetch) — see CachedLyricsEntry.
+  final int syncOffsetMs;
 
   const LyricsResult({
     required this.found,
     required this.lines,
     this.fromCache = false,
     this.isUserPasted = false,
+    this.syncOffsetMs = 0,
   });
 
   static const notFound = LyricsResult(found: false, lines: []);
@@ -173,6 +177,21 @@ class LyricsRepository {
       if (isLive) forceUnsynced = true;
     }
 
+    if (lrclib == null || !lrclib.hasLyrics) {
+      // No confident match for this exact recording at all — one last, much looser attempt
+      // at a differently-arranged version of the same song (an orchestral/acoustic/live
+      // arrangement LRCLIB has under its own distinct title) before giving up entirely. Its
+      // timing belongs to that other arrangement, never this one, so it's always unsynced.
+      final loose = await _lrclibClient.fetchLooseLyrics(
+        trackName: TitleNormalizer.normalizeTitle(title),
+        artistName: artistName,
+      );
+      if (loose != null && loose.hasLyrics) {
+        lrclib = loose;
+        forceUnsynced = true;
+      }
+    }
+
     if (lrclib == null || !lrclib.hasLyrics) return LyricsResult.notFound;
 
     final parsedLines = LrcParser.parse(lrclib.plainLyrics, lrclib.syncedLyrics);
@@ -269,6 +288,7 @@ class LyricsRepository {
       found: entry.found,
       fromCache: true,
       isUserPasted: entry.isUserPasted,
+      syncOffsetMs: entry.syncOffsetMs,
       lines: [
         for (final line in entry.lines)
           LyricsLine(
@@ -286,6 +306,7 @@ class LyricsRepository {
       found: result.found,
       cachedAt: DateTime.now(),
       isUserPasted: result.isUserPasted,
+      syncOffsetMs: result.syncOffsetMs,
       lines: [
         for (final line in result.lines)
           CachedLyricLine(
@@ -295,6 +316,30 @@ class LyricsRepository {
             translation: line.translation,
           ),
       ],
+    );
+  }
+
+  // Persists a manual sync correction against whatever's already cached for this song, so the
+  // next time it plays the offset is restored instead of starting back at 0 — a no-op if
+  // nothing's cached yet for this key (the offset controls only ever show once lyrics are
+  // loaded, so this shouldn't normally happen).
+  Future<void> updateSyncOffset({
+    required String title,
+    required String artist,
+    required int offsetMs,
+  }) async {
+    final key = TitleNormalizer.cacheKey(title, artist);
+    final existing = _cacheBox.get(key);
+    if (existing == null) return;
+    await _cacheBox.put(
+      key,
+      CachedLyricsEntry(
+        found: existing.found,
+        cachedAt: existing.cachedAt,
+        isUserPasted: existing.isUserPasted,
+        syncOffsetMs: offsetMs,
+        lines: existing.lines,
+      ),
     );
   }
 }
