@@ -67,9 +67,9 @@ class LrclibClient {
     if (exact != null && exact.hasSyncedLyrics) return exact;
 
     final candidates = _titleCandidates(trackName, artistName);
-    final searched = await _searchBestAcross(candidates, artistName, artistName, durationSeconds) ??
+    final searched = await _searchBestAcross(candidates, artistName, trackName, artistName, durationSeconds) ??
         (artistName.isNotEmpty
-            ? await _searchBestAcross(candidates, '', artistName, durationSeconds)
+            ? await _searchBestAcross(candidates, '', trackName, artistName, durationSeconds)
             : null);
 
     if (searched != null && searched.hasSyncedLyrics) return searched;
@@ -107,6 +107,7 @@ class LrclibClient {
   Future<LrclibLyrics?> _searchBestAcross(
     List<String> titleCandidates,
     String queryArtist,
+    String originalTrackName,
     String scoringArtist,
     int? durationSeconds,
   ) async {
@@ -119,7 +120,7 @@ class LrclibClient {
         // the *right* song can still score highest on title/artist similarity (it's the same
         // song, just the wrong lyrics field), so this has to disqualify it outright instead of
         // trusting the score to sort it out.
-        if (_isRomanizedMismatch(entry, scoringArtist)) continue;
+        if (_isRomanizedMismatch(entry, originalTrackName, scoringArtist)) continue;
         final score = _matchScore(candidate, scoringArtist, durationSeconds, entry);
         if (score > bestScore) {
           bestScore = score;
@@ -143,7 +144,7 @@ class LrclibClient {
         'duration': ?durationSeconds,
       });
       final data = response.data!;
-      if (_isRomanizedMismatch(data, artistName)) return null;
+      if (_isRomanizedMismatch(data, trackName, artistName)) return null;
       return _parse(data);
     } on DioException catch (e) {
       if (e.response?.statusCode == 404) return null;
@@ -157,19 +158,22 @@ class LrclibClient {
   // accept: scrolling English-letter "pronunciation" as the 원문 defeats the whole point of
   // the 원문/독음 split (and JapaneseDetector.isJapanese never sees any kana to trigger the
   // 독음 tier on, so it would otherwise silently degrade to 2-tier with the wrong original).
-  // Three independent signals, any one enough to reject the candidate:
-  //  1. Self-consistency — the record's own trackName/artistName are in Japanese (kana), but
-  //     its lyrics field isn't. Needs no assumption about what script the *query* used.
-  //  2. Content shape — some submissions are romanized end-to-end (trackName/artistName *and*
-  //     lyrics all in Latin script, e.g. Kenshi Yonezu's "Lemon"), where (1) has nothing to
+  // Four independent signals, any one enough to reject the candidate:
+  //  1. Query title — the *notification's own* title already has kana in it (e.g. "テトリス -
+  //     Tetoris"), which is about as direct a signal as this gets: whatever the record itself
+  //     looks like, the song we're actually trying to match is Japanese. Checked first since
+  //     it needs no guessing at all, unlike 2-4 below.
+  //  2. Self-consistency — the record's own trackName/artistName are in Japanese (kana), but
+  //     its lyrics field isn't. Needs no assumption about what script the *query* used either.
+  //  3. Content shape — some submissions are romanized end-to-end (trackName/artistName *and*
+  //     lyrics all in Latin script, e.g. Kenshi Yonezu's "Lemon"), where 1-2 have nothing to
   //     compare against — JapaneseDetector.looksLikeRomanizedJapanese catches those directly
   //     from the lyrics text's own phonetic shape instead.
-  //  3. Artist name shape — some songs give (1) and (2) nothing to work with either, because
-  //     even the *query* artist is already fully romanized with no distinctive Japanese
-  //     particles in the lyrics for (2) to catch (e.g. HIMEHINA's "Lemonade", whose lyrics are
-  //     genuinely almost all English). JapaneseDetector.looksLikeJapaneseName(queryArtist)
-  //     catches those from the artist name's own phonetic shape instead of the lyrics.
-  bool _isRomanizedMismatch(Map<String, dynamic> result, String queryArtist) {
+  //  4. Artist name shape — for when even the query title/artist are already fully romanized
+  //     with no kana or distinctive Japanese particles anywhere (e.g. HIMEHINA's "Lemonade",
+  //     whose lyrics are genuinely almost all English) — JapaneseDetector.looksLikeJapaneseName
+  //     catches those from the artist name's own phonetic shape instead.
+  bool _isRomanizedMismatch(Map<String, dynamic> result, String queryTitle, String queryArtist) {
     final syncedLyrics = result['syncedLyrics'] as String?;
     final lyrics = (syncedLyrics?.trim().isNotEmpty ?? false)
         ? syncedLyrics!
@@ -177,6 +181,7 @@ class LrclibClient {
     if (lyrics.trim().isEmpty || JapaneseDetector.isJapanese(lyrics)) {
       return false; // empty, or already has real kana — nothing to flag
     }
+    if (JapaneseDetector.isJapanese(queryTitle)) return true;
     final recordTitle = (result['trackName'] as String?) ?? '';
     final recordArtist = (result['artistName'] as String?) ?? '';
     final recordIsJapanese =
