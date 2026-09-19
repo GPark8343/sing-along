@@ -99,6 +99,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // slightly-off match, odd LRCLIB timing, etc.) — set from the full-screen page's sync icon,
   // reset back to false whenever a genuinely new track starts fetching.
   bool _syncDisabledByUser = false;
+  // Mirrors _syncDisabledByUser's role, but for the small overlay's/full-screen page's manual
+  // +/-0.5s timing correction instead of the on/off toggle — same hub-and-spoke propagation
+  // through this HomePage (neither the overlay nor the full-screen page can reach the other
+  // directly), same per-track reset.
+  int _syncOffsetMs = 0;
   bool _expandRequestInFlight = false;
   bool _toggleInFlight = false;
   Timer? _stopDebounceTimer;
@@ -129,6 +134,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           // screen's toggle button keeps reading "오버레이 닫기" for an overlay that's
           // already gone.
           if (mounted) setState(() => _overlayActive = false);
+        case 'syncOffset':
+          _onOverlaySyncOffsetChanged(event);
       }
     });
     _positionSubscription = _watcher.positionStream.listen((event) {
@@ -229,8 +236,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               initialLines: _currentLyrics,
               initialIsUserPasted: _currentLyricsIsUserPasted,
               initialSyncDisabled: _syncDisabledByUser,
+              initialSyncOffsetMs: _syncOffsetMs,
               onLyricsEdited: _applyLyricsResult,
               onSyncToggled: _setSyncDisabled,
+              onSyncOffsetChanged: _setSyncOffset,
             ),
           ),
         );
@@ -290,8 +299,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _fetchLyricsFor(NowPlaying nowPlaying) async {
     // Only ever called for a genuine track change (a fresh fetch, or a catch-up for a song
     // that isn't the one currently held) — never for the same song re-displaying, so this is
-    // always the right place to drop a manual sync-off choice that belonged to the last song.
+    // always the right place to drop a manual sync-off choice (and offset correction) that
+    // belonged to the last song.
     _syncDisabledByUser = false;
+    _syncOffsetMs = 0;
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
     // Marks this as the current track for as long as its fetch is running — if the song
     // changes again before it finishes (a fast skip, or several in a row), whichever fetch
@@ -361,6 +372,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       'fromCache': result.fromCache,
       'isUserPasted': result.isUserPasted,
       'syncDisabled': _syncDisabledByUser,
+      'syncOffsetMs': _syncOffsetMs,
       'trackKey': nowPlaying.trackKey,
       'title': nowPlaying.title,
       'artist': nowPlaying.artist ?? '',
@@ -469,6 +481,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (payload == null) return;
     _lastLyricsPayload = {...payload, 'syncDisabled': disabled};
     await FlutterOverlayWindow.shareData(_lastLyricsPayload);
+  }
+
+  // Called when the full-screen page's own +/- buttons change the offset — same propagation
+  // as _setSyncDisabled above, so the small overlay (open or not right now) picks up the same
+  // correction next time it renders.
+  Future<void> _setSyncOffset(int offsetMs) async {
+    if (_syncOffsetMs == offsetMs) return;
+    _syncOffsetMs = offsetMs;
+    final payload = _lastLyricsPayload;
+    if (payload == null) return;
+    _lastLyricsPayload = {...payload, 'syncOffsetMs': offsetMs};
+    await FlutterOverlayWindow.shareData(_lastLyricsPayload);
+  }
+
+  // The mirror image of _setSyncOffset — the small overlay's own +/- buttons changed the
+  // offset instead, relayed here (the overlay can't reach the full-screen page directly) so
+  // that page picks up the same value the next time it's opened for this song. No need to
+  // shareData anything back out: the overlay that sent this already has the value locally.
+  void _onOverlaySyncOffsetChanged(Map event) {
+    final offsetMs = event['offsetMs'] as int?;
+    if (offsetMs == null) return;
+    // Guards against a message for a song that's since been skipped past landing after the
+    // fact and overwriting the new song's already-reset offset — same trackKey staleness
+    // check _onPosition uses for the overlay's own position pings.
+    if (event['trackKey'] != _nowPlaying?.trackKey) return;
+    _syncOffsetMs = offsetMs;
+    final payload = _lastLyricsPayload;
+    if (payload != null) {
+      _lastLyricsPayload = {...payload, 'syncOffsetMs': offsetMs};
+    }
   }
 
   String _statusFor(LyricsResult result) {

@@ -150,6 +150,11 @@ class _OverlayRootState extends State<OverlayRoot> {
       _fromCache = event['fromCache'] as bool? ?? false;
       _isUserPasted = event['isUserPasted'] as bool? ?? false;
       _syncDisabledByUser = event['syncDisabled'] as bool? ?? false;
+      // Read unconditionally, not just on a genuinely new track — this is also how a
+      // correction made on the full-screen page for the *current* song reaches here (see
+      // main.dart's _setSyncOffset, which re-sends the whole payload after updating this
+      // field).
+      _syncOffsetMs = event['syncOffsetMs'] as int? ?? 0;
       _lines = found
           ? [
               for (final entry in rawLines)
@@ -164,7 +169,6 @@ class _OverlayRootState extends State<OverlayRoot> {
       if (isGenuinelyNewTrack) {
         _positionMs = null;
         _currentIndex = 0;
-        _syncOffsetMs = 0;
       } else {
         _recomputeCurrentIndex();
       }
@@ -221,6 +225,17 @@ class _OverlayRootState extends State<OverlayRoot> {
     setState(() {
       _syncOffsetMs += deltaMs;
       _recomputeCurrentIndex();
+    });
+    // The full-screen page can't be reached directly (different engine, no shared Dart
+    // memory) — relayed through the main engine instead, the same hub every other cross-
+    // engine bit of state (lyrics, position, the sync on/off toggle) already goes through.
+    // trackKey is included so a stale message that lands after the song's already changed
+    // again doesn't overwrite the new song's freshly-reset offset (see
+    // main.dart's _onOverlaySyncOffsetChanged).
+    FlutterOverlayWindow.shareData({
+      'type': 'syncOffset',
+      'offsetMs': _syncOffsetMs,
+      'trackKey': _trackKey,
     });
   }
 

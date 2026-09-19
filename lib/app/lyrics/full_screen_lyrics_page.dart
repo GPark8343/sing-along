@@ -23,8 +23,10 @@ class FullScreenLyricsPage extends StatefulWidget {
     required this.initialLines,
     this.initialIsUserPasted = false,
     this.initialSyncDisabled = false,
+    this.initialSyncOffsetMs = 0,
     this.onLyricsEdited,
     this.onSyncToggled,
+    this.onSyncOffsetChanged,
   });
 
   final NowPlayingWatcher watcher;
@@ -33,6 +35,11 @@ class FullScreenLyricsPage extends StatefulWidget {
   final List<LyricsLine> initialLines;
   final bool initialIsUserPasted;
   final bool initialSyncDisabled;
+  // Whatever the small overlay's own +/- buttons last left this song's timing correction at
+  // (0 if never touched, or if this is a fresh track) — main.dart is the only thing both this
+  // page and the overlay can reach, so this is how a correction made in one carries over to
+  // the other.
+  final int initialSyncOffsetMs;
   // Called after a paste-in or a refetch-from-API succeeds, so the main engine (and, through
   // it, the small overlay — this page can't reach the overlay directly, only the main engine's
   // own shareData channel can) picks up the edit immediately instead of sitting on whatever it
@@ -42,6 +49,9 @@ class FullScreenLyricsPage extends StatefulWidget {
   // Called when the user taps the sync icon to turn synced auto-scroll off (a match that
   // looks right but feels off in practice) or back on — same propagation reason as above.
   final Future<void> Function(bool disabled)? onSyncToggled;
+  // Called whenever the +/- buttons change the offset — same propagation reason as above, so
+  // the small overlay picks up the same correction rather than each tracking its own.
+  final Future<void> Function(int offsetMs)? onSyncOffsetChanged;
 
   @override
   State<FullScreenLyricsPage> createState() => _FullScreenLyricsPageState();
@@ -62,6 +72,15 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   bool _isUserPasted = false;
   bool _refetchingFromApi = false;
   bool _syncManuallyDisabled = false;
+  // A manual correction for a synced song whose LRC timing doesn't quite line up with what's
+  // actually playing — added to the real position before comparing against each line's
+  // timestamp, so a positive value makes lines advance *earlier* (use this when the lyrics are
+  // lagging behind the audio) and a negative one delays them (use this when lines are
+  // appearing too early). Mirrors the small overlay's own offset control — kept as separate
+  // state rather than shared, since the overlay engine and this one are different Flutter
+  // engines with no shared Dart memory (see main.dart's part-of note). Resets on a track
+  // change, same as the overlay's.
+  int _syncOffsetMs = 0;
   // True only while the user's finger is actually on the list (set/cleared by a
   // NotificationListener<ScrollNotification> below, keyed off a real drag gesture — never by
   // our own programmatic scrollTo, so this can't self-trigger). A line change that lands
@@ -95,6 +114,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     _currentTrackKey = widget.initialNowPlaying?.trackKey;
     _isUserPasted = widget.initialIsUserPasted;
     _syncManuallyDisabled = widget.initialSyncDisabled;
+    _syncOffsetMs = widget.initialSyncOffsetMs;
     _positionSub = widget.watcher.positionStream.listen(_onPosition);
     _trackChangeSub = widget.watcher.trackChanges.listen(_onTrackChanged);
   }
@@ -210,6 +230,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
         _pasteController.clear();
         _syncManuallyDisabled =
             false; // a sync-off choice belonged to the last song, not this one
+        _syncOffsetMs = 0; // ditto for a timing correction
       });
     }
     final result = await widget.lyricsRepository.getLyrics(
@@ -235,9 +256,14 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   void _onPosition(NowPlaying? nowPlaying) {
     if (nowPlaying == null || _lines.isEmpty || !_isSynced) return;
     _nowPlaying = nowPlaying;
+    _updateCurrentIndexForPosition(nowPlaying.positionMs);
+  }
+
+  void _updateCurrentIndexForPosition(int rawPositionMs) {
+    final adjustedPositionMs = rawPositionMs + _syncOffsetMs;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
-      if (_lines[i].timestampMs! <= nowPlaying.positionMs) {
+      if (_lines[i].timestampMs! <= adjustedPositionMs) {
         index = i;
       } else {
         break;
@@ -258,6 +284,16 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
         curve: Curves.easeOut,
       );
     }
+  }
+
+  // Unlike _onPosition (only called from a live position ping), this needs to force the
+  // recompute even when the resulting index doesn't change — the offset itself is what the
+  // user is trying to see feedback on, not just the current line.
+  void _adjustSyncOffset(int deltaMs) {
+    setState(() => _syncOffsetMs += deltaMs);
+    final positionMs = _nowPlaying?.positionMs;
+    if (positionMs != null) _updateCurrentIndexForPosition(positionMs);
+    widget.onSyncOffsetChanged?.call(_syncOffsetMs);
   }
 
   String _titleAndArtist() {
@@ -379,40 +415,64 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                         ? () => setState(() => _showPasteForm = false)
                         : null,
                   )
-                : NotificationListener<ScrollNotification>(
-                    // dragDetails is only non-null for a real finger-driven drag — our own
-                    // scrollTo() below animates the list too and fires these same
-                    // notifications, but never with dragDetails, so this can't mistake its
-                    // own programmatic scroll for the user grabbing the list.
-                    onNotification: (notification) {
-                      if (notification is ScrollStartNotification &&
-                          notification.dragDetails != null) {
-                        _userDragging = true;
-                      } else if (notification is ScrollEndNotification) {
-                        _userDragging = false;
-                      }
-                      return false;
-                    },
-                    child: ScrollablePositionedList.builder(
-                      itemScrollController: _scrollController,
-                      itemCount: _lines.length,
-                      // Same 360x800dp reference frame _LyricRow's font ratios use — enough
-                      // top/bottom room for the current line to center comfortably even at
-                      // the very start/end of the list, scaled to the actual screen instead
-                      // of staying a fixed dp budget on every device.
-                      padding: EdgeInsets.symmetric(
-                        vertical: MediaQuery.of(context).size.height * 0.175,
-                        horizontal: MediaQuery.of(context).size.width * 0.0667,
+                : Column(
+                    children: [
+                      // Sitting right above the lyrics themselves (not in the AppBar) so it
+                      // doesn't eat into the title marquee's already-tight width — a long
+                      // title+artist string was getting clipped noticeably once this and the
+                      // sync/edit/refresh icons all had to share the AppBar with it. Only
+                      // meaningful while actually auto-advancing — there's no "timing" to
+                      // correct for a manually-scrolled or sync-disabled song. Mirrors the
+                      // small overlay's own offset control (see overlay_main.dart's
+                      // _SyncOffsetButton) — separate state since the two run in different
+                      // Flutter engines with no shared Dart memory.
+                      if (_isSynced) _SyncOffsetBar(
+                        offsetMs: _syncOffsetMs,
+                        onAdjust: _adjustSyncOffset,
                       ),
-                      // Without sync data _currentIndex isn't tracking playback at all — it's
-                      // just wherever it last happened to be (usually 0) — so highlighting it as
-                      // "current" would be highlighting a meaningless line rather than the one
-                      // actually being sung.
-                      itemBuilder: (context, index) => _LyricRow(
-                        line: _lines[index],
-                        isCurrent: _isSynced && index == _currentIndex,
+                      Expanded(
+                        child: NotificationListener<ScrollNotification>(
+                          // dragDetails is only non-null for a real finger-driven drag — our
+                          // own scrollTo() below animates the list too and fires these same
+                          // notifications, but never with dragDetails, so this can't mistake
+                          // its own programmatic scroll for the user grabbing the list.
+                          onNotification: (notification) {
+                            if (notification is ScrollStartNotification &&
+                                notification.dragDetails != null) {
+                              _userDragging = true;
+                            } else if (notification is ScrollEndNotification) {
+                              _userDragging = false;
+                            }
+                            return false;
+                          },
+                          child: ScrollablePositionedList.builder(
+                            itemScrollController: _scrollController,
+                            itemCount: _lines.length,
+                            // Bottom kept generous (same 360x800dp reference frame
+                            // _LyricRow's font ratios use) so the last line can still center
+                            // comfortably once it becomes current, same as before. Top
+                            // shrunk down — it used to match the bottom, but once the sync
+                            // offset bar (or nothing, when unsynced) already sits right above
+                            // this list, that much *extra* empty space before the first line
+                            // besides was just a big gap for no reason.
+                            padding: EdgeInsets.fromLTRB(
+                              MediaQuery.of(context).size.width * 0.0667,
+                              MediaQuery.of(context).size.height * 0.04,
+                              MediaQuery.of(context).size.width * 0.0667,
+                              MediaQuery.of(context).size.height * 0.175,
+                            ),
+                            // Without sync data _currentIndex isn't tracking playback at all
+                            // — it's just wherever it last happened to be (usually 0) — so
+                            // highlighting it as "current" would be highlighting a
+                            // meaningless line rather than the one actually being sung.
+                            itemBuilder: (context, index) => _LyricRow(
+                              line: _lines[index],
+                              isCurrent: _isSynced && index == _currentIndex,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
           ),
         ),
@@ -487,6 +547,46 @@ class _PasteLyricsForm extends StatelessWidget {
               child: const Text('취소', style: TextStyle(color: Colors.white54)),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A manual +/-0.5s correction for a synced song's timing, shown as its own bar above the
+/// lyrics list rather than crammed into the AppBar — see the build() call site for why.
+class _SyncOffsetBar extends StatelessWidget {
+  const _SyncOffsetBar({required this.offsetMs, required this.onAdjust});
+
+  final int offsetMs;
+  final void Function(int deltaMs) onAdjust;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          IconButton(
+            tooltip: '가사를 조금 늦게 (-0.5초)',
+            icon: const Icon(Icons.remove, color: Colors.white70),
+            onPressed: () => onAdjust(-500),
+          ),
+          SizedBox(
+            width: 56,
+            child: Text(
+              '${offsetMs > 0 ? '+' : ''}${(offsetMs / 1000).toStringAsFixed(1)}s',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+          ),
+          IconButton(
+            tooltip: '가사를 조금 빠르게 (+0.5초)',
+            icon: const Icon(Icons.add, color: Colors.white70),
+            onPressed: () => onAdjust(500),
+          ),
         ],
       ),
     );
