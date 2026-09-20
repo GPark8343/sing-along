@@ -303,6 +303,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // belonged to the last song.
     _syncDisabledByUser = false;
     _syncOffsetMs = 0;
+    if (nowPlaying.artist == null || nowPlaying.artist!.trim().isEmpty) {
+      // Some apps report the title a beat before the artist tag finishes populating — fetching
+      // (and caching!) immediately on a blank artist creates a second, wrongly-keyed cache
+      // entry for what's really the same song once the artist does arrive a moment later, and
+      // that stray entry's own search (with nothing to narrow it down) is far more likely to
+      // land on a completely different, unrelated "same title" song. A short wait lets a
+      // same-track update with the real artist attached replace this one before anything is
+      // fetched or written to the cache at all.
+      await Future.delayed(const Duration(milliseconds: 600));
+      final latest = _nowPlaying;
+      if (latest != null &&
+          latest.trackKey == nowPlaying.trackKey &&
+          latest.artist != null &&
+          latest.artist!.trim().isNotEmpty) {
+        nowPlaying = latest;
+      }
+    }
     if (mounted) setState(() => _lyricsStatus = '가사 검색 중...');
     // Marks this as the current track for as long as its fetch is running — if the song
     // changes again before it finishes (a fast skip, or several in a row), whichever fetch
@@ -429,7 +446,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await box.deleteAll(staleKeys);
     }
     if (mounted) {
-      setState(() {}); // recent-songs/search sections read straight from the box
+      setState(
+        () {},
+      ); // recent-songs/search sections read straight from the box
     }
   }
 
@@ -852,14 +871,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     onTap: widget.boxes.recentSongs.isEmpty
                         ? null
                         : () => Navigator.of(context).push(
-                              _fadeThroughRoute(
-                                SavedSongsListPage(
-                                  songs: _recentSongsSorted(),
-                                  onOpen: _openSavedLyrics,
-                                  onDelete: _deleteSavedSong,
-                                ),
+                            _fadeThroughRoute(
+                              SavedSongsListPage(
+                                songs: _recentSongsSorted(),
+                                onOpen: _openSavedLyrics,
+                                onDelete: _deleteSavedSong,
                               ),
                             ),
+                          ),
                     // At least a 48dp-tall tap target (Android's own minimum touch target
                     // guideline) — the plain underlined text this replaced measured barely
                     // more than the text glyphs themselves, too small and fiddly to tap

@@ -122,33 +122,44 @@ class LyricsRepository {
     return result;
   }
 
-  /// Saves lyrics the user pasted in themselves — LRCLIB matched the wrong song, or didn't have
-  /// this one at all, so this goes straight into the same cache slot getLyrics() would have
-  /// filled. Deliberately skips the phonetic/translation pipeline entirely (no on-device
-  /// Kuromoji pass, no DeepL call) — the user typed/pasted this exact text themselves, so it's
-  /// shown back verbatim rather than run through a pipeline built for machine-fetched originals.
-  /// No timestamps either (pasted text has no LRC timing), so it's unsynced like any other
-  /// plain lyrics — manual left/right tap navigation, not auto-advancing.
+  /// Saves lyrics the user typed/corrected themselves, one line at a time (original/독음/번역
+  /// kept together per line rather than as three parallel blocks of text) — either a fresh
+  /// paste-in (LRCLIB matched the wrong song, or didn't have this one at all) or a correction
+  /// of a few lines in an already-synced song. Skips the phonetic/translation *pipeline* (no
+  /// on-device Kuromoji pass, no DeepL call) since the user is providing that text directly.
+  /// Each [LyricsLine.timestampMs] is trusted as given rather than forced to null — the
+  /// whole-song correction layout preserves a synced song's original per-line timestamps when
+  /// it builds [lines], while the paste-in layout never has any to begin with, so this doesn't
+  /// need to know which case it's in: if *any* line still carries a real timestamp, this was a
+  /// correction (kept synced, [isUserPasted] carried over from whatever's already cached rather
+  /// than forced true), otherwise it's a genuine paste-in. A line with nothing typed for its
+  /// original text is dropped; if that leaves nothing at all, the song is saved back to
+  /// "no lyrics" rather than an empty entry.
   Future<LyricsResult> savePastedLyrics({
     required String title,
     required String artist,
-    required String pastedText,
+    required List<LyricsLine> lines,
   }) async {
-    final originalTexts = pastedText
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .toList();
-    if (originalTexts.isEmpty) return LyricsResult.notFound;
+    final trimmedLines = [
+      for (final line in lines)
+        if (line.original.trim().isNotEmpty)
+          LyricsLine(
+            timestampMs: line.timestampMs,
+            original: line.original.trim(),
+            phonetic: _nonEmpty(line.phonetic),
+            translation: _nonEmpty(line.translation),
+          ),
+    ];
+    if (trimmedLines.isEmpty) return LyricsResult.notFound;
+    final key = TitleNormalizer.cacheKey(title, artist);
+    final preservesSync = trimmedLines.any((line) => line.timestampMs != null);
+    final existing = preservesSync ? _cacheBox.get(key) : null;
     final result = LyricsResult(
       found: true,
-      isUserPasted: true,
-      lines: [
-        for (final text in originalTexts)
-          LyricsLine(timestampMs: null, original: text),
-      ],
+      isUserPasted: preservesSync ? (existing?.isUserPasted ?? false) : true,
+      syncOffsetMs: existing?.syncOffsetMs ?? 0,
+      lines: trimmedLines,
     );
-    final key = TitleNormalizer.cacheKey(title, artist);
     await _cacheBox.put(key, _toCache(result));
     return result;
   }
@@ -366,16 +377,18 @@ class LyricsRepository {
     );
   }
 
-  // Corrects a single line's 독음/번역 in place — the original text and its timestamp are left
-  // untouched, so a fetched song's sync and every other line stay exactly as they were. Useful
-  // for the common case of the on-device Kuromoji reading getting one word wrong, where
-  // discarding the whole song via savePastedLyrics()/refetchFromApi() would be needless. A
-  // no-op if the index no longer lines up with what's cached (the song changed underneath, or
-  // nothing's cached for this key at all).
+  // Corrects a single line's 원문/독음/번역 in place — the timestamp is always left untouched,
+  // so a fetched song's sync and every other line stay exactly as they were, even when the
+  // original text itself is the thing being corrected. Useful for the common case of the
+  // on-device Kuromoji reading getting one word wrong, where discarding the whole song via
+  // savePastedLyrics()/refetchFromApi() would be needless. A no-op if the index no longer
+  // lines up with what's cached (the song changed underneath, or nothing's cached for this key
+  // at all).
   Future<LyricsResult?> updateLine({
     required String title,
     required String artist,
     required int lineIndex,
+    String? original,
     String? phonetic,
     String? translation,
   }) async {
@@ -388,9 +401,13 @@ class LyricsRepository {
     }
     final updatedLines = List<CachedLyricLine>.from(existing.lines);
     final old = updatedLines[lineIndex];
+    // A line with no original text at all doesn't make sense (unlike 독음/번역, which are
+    // legitimately optional) — an empty edit is treated as "leave it alone" rather than
+    // blanking it out.
+    final newOriginal = _nonEmpty(original) ?? old.original;
     updatedLines[lineIndex] = CachedLyricLine(
       timestampMs: old.timestampMs,
-      original: old.original,
+      original: newOriginal,
       phonetic: _nonEmpty(phonetic),
       translation: _nonEmpty(translation),
     );

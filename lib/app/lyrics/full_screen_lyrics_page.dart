@@ -60,7 +60,6 @@ class FullScreenLyricsPage extends StatefulWidget {
 class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     with WidgetsBindingObserver {
   final ItemScrollController _scrollController = ItemScrollController();
-  final TextEditingController _pasteController = TextEditingController();
   late List<LyricsLine> _lines;
   NowPlaying? _nowPlaying;
   late String? _currentTrackKey;
@@ -90,19 +89,21 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   StreamSubscription<NowPlaying?>? _positionSub;
   StreamSubscription<NowPlaying?>? _trackChangeSub;
 
-  bool get _hasSyncData =>
-      _lines.isNotEmpty && _lines.first.timestampMs != null;
+  // Checked across every line, not just the first — an otherwise-fully-timed LRCLIB submission
+  // occasionally has an untimed leading line (a credit, an intro tag), which made this whole
+  // song register as "no sync at all" and permanently disable the toggle even though every
+  // other line genuinely had real timing.
+  bool get _hasSyncData => _lines.any((line) => line.timestampMs != null);
   bool get _isSynced => _hasSyncData && !_syncManuallyDisabled;
 
   // Mirrors exactly which icons the AppBar's `actions` below actually renders, so the title
   // marquee's width calculation (which can't rely on AppBar handing it a bounded constraint
   // — see _MarqueeText's own comment) stays accurate instead of assuming a fixed icon count.
   int get _appBarActionCount {
-    if (_lines.isEmpty || _showPasteForm) return 0;
-    return 2 +
-        (_isUserPasted
-            ? 1
-            : 0); // sync/tooltip + edit, plus refresh when pasted
+    if (_lines.isEmpty) return 0;
+    return 1 + // sync/tooltip icon, always shown
+        (_showPasteForm ? 0 : 1) + // edit icon, hidden while already editing
+        (_isUserPasted ? 1 : 0); // refresh icon, only for a paste-in
   }
 
   @override
@@ -146,7 +147,6 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     WidgetsBinding.instance.removeObserver(this);
     _positionSub?.cancel();
     _trackChangeSub?.cancel();
-    _pasteController.dispose();
     super.dispose();
   }
 
@@ -157,6 +157,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
     if (nowPlaying == null || index < 0 || index >= _lines.length) return;
     final line = _lines[index];
+    final originalController = TextEditingController(text: line.original);
     final phoneticController = TextEditingController(text: line.phonetic ?? '');
     final translationController = TextEditingController(
       text: line.translation ?? '',
@@ -166,34 +167,43 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
       builder: (context) => AlertDialog(
         backgroundColor: MetalTheme.surfaceDark,
         title: const Text('가사 줄 수정', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              line.original,
-              style: const TextStyle(color: Colors.white54, fontSize: 14),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: phoneticController,
-              autofocus: true,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: '독음',
-                labelStyle: TextStyle(color: Colors.white54),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Editable, not just shown for reference — a correction here still keeps the
+              // line's timestamp untouched (see updateLine()), so sync isn't lost even when
+              // the original text itself was the thing that needed fixing.
+              TextField(
+                controller: originalController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: '원문',
+                  labelStyle: TextStyle(color: Colors.white54),
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: translationController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: '번역',
-                labelStyle: TextStyle(color: Colors.white54),
+              const SizedBox(height: 12),
+              TextField(
+                controller: phoneticController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: '독음',
+                  labelStyle: TextStyle(color: Colors.white54),
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              TextField(
+                controller: translationController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: '번역',
+                  labelStyle: TextStyle(color: Colors.white54),
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -212,6 +222,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
       lineIndex: index,
+      original: originalController.text,
       phonetic: phoneticController.text,
       translation: translationController.text,
     );
@@ -225,28 +236,36 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   // going through the same on-device phonetic/translation pipeline a real fetch would and
   // landing in the same cache slot, so it displays and persists exactly like a normal result
   // (just unsynced, since pasted text carries no LRC timing).
-  Future<void> _savePastedLyrics() async {
-    final text = _pasteController.text;
+  Future<void> _savePastedLyrics(List<LyricsLine> lines) async {
     final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
-    // Saving with nothing typed is allowed on purpose — clearing the box with "전체 삭제" and
-    // hitting save is how this song gets marked back to "no lyrics" instead of being stuck
-    // showing whatever was pasted in before.
+    // Saving with every line emptied out is allowed on purpose — clearing the form and hitting
+    // save is how this song gets marked back to "no lyrics" instead of being stuck showing
+    // whatever was pasted in before.
     if (nowPlaying == null || _savingPastedLyrics) return;
     setState(() => _savingPastedLyrics = true);
     final result = await widget.lyricsRepository.savePastedLyrics(
       title: nowPlaying.title,
       artist: nowPlaying.artist ?? '',
-      pastedText: text,
+      lines: lines,
     );
     if (!mounted) return;
     setState(() {
       _savingPastedLyrics = false;
+      // Reflected on this same screen immediately — no extra round trip needed, since the
+      // fresh result is already in hand here rather than waiting on onLyricsEdited below.
       _lines = result.found ? result.lines : const [];
       _isUserPasted = result.isUserPasted;
       _currentIndex = 0;
-      _pasteController.clear();
       _showPasteForm = false;
     });
+    // Lands back on the full lyrics view at the top — the edit form (whichever layout it was
+    // showing) is gone the instant _showPasteForm flips, but without this the list could still
+    // be scrolled wherever it happened to be from before this song was even opened for editing.
+    if (result.found && _scrollController.isAttached) {
+      _scrollController.jumpTo(index: 0);
+    }
+    // Propagates to main.dart (and, through it, the small overlay) so neither is left showing
+    // the stale pre-edit text until the next natural track change.
     await widget.onLyricsEdited?.call(nowPlaying, result);
   }
 
@@ -296,7 +315,6 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
         _lines = const [];
         _showPasteForm =
             false; // a paste form left open for the previous song is stale here
-        _pasteController.clear();
         _syncManuallyDisabled =
             false; // a sync-off choice belonged to the last song, not this one
         _syncOffsetMs = 0; // ditto for a timing correction
@@ -332,7 +350,12 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     final adjustedPositionMs = rawPositionMs + _syncOffsetMs;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
-      if (_lines[i].timestampMs! <= adjustedPositionMs) {
+      // A line with no timestamp of its own (an untimed leading credit/tag — see
+      // _hasSyncData) can't be compared against the position at all; skip it rather than
+      // crash on the null, leaving index pointed at the last *timed* line at or before now.
+      final timestampMs = _lines[i].timestampMs;
+      if (timestampMs == null) continue;
+      if (timestampMs <= adjustedPositionMs) {
         index = i;
       } else {
         break;
@@ -377,16 +400,22 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      // Let the pop happen normally first — main.dart's _onExpandRequested() is awaiting
-      // this route's pop to restore the compact overlay, so blocking it here would leave
-      // that cleanup stuck waiting forever. moveTaskToBack() alongside it is what actually
-      // sends the user back to whatever app (e.g. YouTube Music) was in front before
-      // bringToFront() surfaced this one — a plain pop alone would only reveal this app's
-      // own HomePage underneath, since this route lives in the same Activity/Navigator.
-      canPop: true,
+      // While the edit form is open, back closes *that* and returns to this same page's
+      // reading view — not the small overlay — the same as tapping 취소 would. Only when
+      // there's no form to back out of does back actually leave the full-screen page: let the
+      // pop happen normally first (main.dart's _onExpandRequested() is awaiting this route's
+      // pop to restore the compact overlay, so blocking it here would leave that cleanup stuck
+      // waiting forever), then moveTaskToBack() alongside it to actually send the user back to
+      // whatever app (e.g. YouTube Music) was in front before bringToFront() surfaced this one
+      // — a plain pop alone would only reveal this app's own HomePage underneath, since this
+      // route lives in the same Activity/Navigator.
+      canPop: !_showPasteForm,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop) return;
-        NotificationBridge.moveTaskToBack();
+        if (didPop) {
+          NotificationBridge.moveTaskToBack();
+          return;
+        }
+        if (_showPasteForm) setState(() => _showPasteForm = false);
       },
       child: Scaffold(
         backgroundColor: MetalTheme.base,
@@ -409,11 +438,13 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
             reservedWidth: 56 + _appBarActionCount * 48 + 20,
           ),
           actions: [
-            if (_lines.isNotEmpty && !_showPasteForm) ...[
+            if (_lines.isNotEmpty) ...[
               if (_hasSyncData)
                 // Real sync data exists for this song — tappable, so a match that looks right
                 // but feels off in practice (an odd LRCLIB timing offset, etc.) can be turned
-                // off, and back on again, any number of times.
+                // off, and back on again, any number of times. Kept visible even while the
+                // paste/edit form is open (unlike the icons below) — nothing about being mid-edit
+                // makes the current song's sync state stop mattering.
                 IconButton(
                   tooltip: _isSynced
                       ? '싱크됨 — 자동으로 넘어감 (탭하면 끄기)'
@@ -433,20 +464,16 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                   message: '싱크 없음 — 직접 스크롤해서 보세요',
                   child: Icon(Icons.sync_disabled, color: Colors.orangeAccent),
                 ),
-              IconButton(
-                tooltip: '가사가 틀렸나요? 직접 입력',
-                icon: const Icon(Icons.edit_note, color: Colors.white70),
-                onPressed: () => setState(() {
-                  // Pre-fills with what's already showing (pasted or fetched) so this is an
-                  // edit of the existing text rather than a blank retype from scratch — the
-                  // auto-opened not-found case has nothing to pre-fill, so it still starts empty.
-                  _pasteController.text = _lines
-                      .map((line) => line.original)
-                      .join('\n');
-                  _showPasteForm = true;
-                }),
-              ),
+              if (!_showPasteForm)
+                IconButton(
+                  tooltip: '가사가 틀렸나요? 직접 입력',
+                  icon: const Icon(Icons.edit_note, color: Colors.white70),
+                  onPressed: () => setState(() => _showPasteForm = true),
+                ),
               if (_isUserPasted)
+                // Kept visible even while the paste form is open, same reasoning as the sync
+                // icon above — it's the safety net for an accidental "전체 삭제", so hiding it
+                // right when it's most likely to be needed would defeat the point.
                 IconButton(
                   tooltip: '직접 입력한 가사를 버리고 원본을 다시 불러오기',
                   icon: _refetchingFromApi
@@ -483,7 +510,12 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                   )
                 : (_lines.isEmpty || _showPasteForm)
                 ? _PasteLyricsForm(
-                    controller: _pasteController,
+                    // Pre-fills with what's already showing (pasted or fetched) so this is an
+                    // edit of the existing lines rather than a blank retype from scratch — the
+                    // auto-opened not-found case has nothing to pre-fill, so it starts with one
+                    // empty line instead.
+                    initialLines: _lines,
+                    isSynced: _isSynced,
                     saving: _savingPastedLyrics,
                     onSave: _savePastedLyrics,
                     // Only offer a way out without saving when there's something to go back
@@ -546,7 +578,15 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                             itemBuilder: (context, index) => _LyricRow(
                               line: _lines[index],
                               isCurrent: _isSynced && index == _currentIndex,
-                              onEdit: () => _editLine(index),
+                              // A synced song's per-line timestamps are worth protecting, so a
+                              // long-press there corrects just that one line in place (see
+                              // _editLine). An unsynced song has no timing to protect and no
+                              // reliable "this exact line" concept to correct in isolation
+                              // (nothing highlights a "current" line to begin with) — so editing
+                              // there goes straight to the whole-song form instead.
+                              onEdit: _isSynced
+                                  ? () => _editLine(index)
+                                  : () => setState(() => _showPasteForm = true),
                             ),
                           ),
                         ),
@@ -560,92 +600,355 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   }
 }
 
-class _PasteLyricsForm extends StatelessWidget {
+// One lyric line's worth of editable text — original/phonetic/translation kept together as a
+// unit (rather than three parallel lists matched by index) so adding, removing or reordering a
+// line can never desync which phonetic/translation belongs to which original.
+class _LineControllers {
+  _LineControllers({
+    String original = '',
+    String phonetic = '',
+    String translation = '',
+    this.timestampMs,
+  }) : original = TextEditingController(text: original),
+       phonetic = TextEditingController(text: phonetic),
+       translation = TextEditingController(text: translation);
+
+  final TextEditingController original;
+  final TextEditingController phonetic;
+  final TextEditingController translation;
+  // Carried through untouched from whatever this line already had (null for a brand new line,
+  // or one that started out unsynced) — this is what lets correcting a synced song's text
+  // through this same form keep its sync instead of losing it, see _save()'s _synced branch.
+  final int? timestampMs;
+
+  void dispose() {
+    original.dispose();
+    phonetic.dispose();
+    translation.dispose();
+  }
+}
+
+class _PasteLyricsForm extends StatefulWidget {
   const _PasteLyricsForm({
-    required this.controller,
+    required this.initialLines,
+    required this.isSynced,
     required this.saving,
     required this.onSave,
     this.onCancel,
   });
 
-  final TextEditingController controller;
+  final List<LyricsLine> initialLines;
+  // Picks which layout shows below — see _PasteLyricsFormState's class comment. A widget
+  // property (not just read once in initState) because it needs to react live: the sync icon
+  // stays reachable while this form is open specifically so toggling it here switches layouts
+  // without closing and reopening the form.
+  final bool isSynced;
   final bool saving;
-  final VoidCallback onSave;
+  final void Function(List<LyricsLine> lines) onSave;
   // Present only when there's an existing (if wrong) result behind this form to go back to
   // without saving — null for the auto-opened not-found case, where there's nothing to cancel to.
   final VoidCallback? onCancel;
 
   @override
+  State<_PasteLyricsForm> createState() => _PasteLyricsFormState();
+}
+
+// Two layouts, switched live off the sync toggle:
+//  - Synced: one row per line (원문/독음/번역 kept together, stacked the same way the actual
+//    reading view shows them) — a synced song's line-for-line structure is worth protecting, so
+//    this corrects it in place rather than restructuring it.
+//  - Unsynced: a single plain-text field holding the whole song at once — still all three
+//    tiers, just not sorted into separate 원문/독음/번역 boxes. Every 3 lines of the field is
+//    one song line (원문, then 독음, then 번역, blank if a tier doesn't apply), back to back
+//    with no separator — line 1-3 is the first song line, 4-6 the second, and so on. There's no
+//    per-line timing to protect here, so free-typing (or pasting something already in this
+//    3-line grouping) is far faster than filling in three separate tiers by hand.
+// _lineGroups is the only place a real timestamp lives, and it's never rebuilt from the single
+// field's free-typed text — toggling to unsynced regenerates that field fresh from _lineGroups
+// every time (discarding whatever draft was in it before), and toggling back to synced just
+// reveals _lineGroups again untouched. A draft typed into the single field only actually takes
+// effect if 저장 is pressed while still in the unsynced layout; switching back to synced first
+// discards it. This is deliberately less "clever" than trying to re-split the free-typed text
+// back into rows and re-match each one to its original timestamp by position — a single extra
+// or missing line while typing would silently misalign everything after it and lose that
+// line's (and every later line's) sync without any visible sign it had happened.
+class _PasteLyricsFormState extends State<_PasteLyricsForm> {
+  static const int _tiersPerLine = 3;
+
+  late List<_LineControllers> _lineGroups;
+  late final TextEditingController _bulkAll;
+  late bool _synced;
+
+  @override
+  void initState() {
+    super.initState();
+    _synced = widget.isSynced;
+    _lineGroups = widget.initialLines.isEmpty
+        ? [_LineControllers()]
+        : [
+            for (final line in widget.initialLines)
+              _LineControllers(
+                original: line.original,
+                phonetic: line.phonetic ?? '',
+                translation: line.translation ?? '',
+                timestampMs: line.timestampMs,
+              ),
+          ];
+    _bulkAll = TextEditingController(text: _bulkTextFrom(_lineGroups));
+  }
+
+  String _bulkTextFrom(List<_LineControllers> groups) => [
+    for (final group in groups) ...[
+      group.original.text,
+      group.phonetic.text,
+      group.translation.text,
+    ],
+  ].join('\n');
+
+  @override
+  void didUpdateWidget(covariant _PasteLyricsForm oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isSynced == _synced) return;
+    // Synced -> unsynced: refresh the single field from the current (untouched) rows, so it
+    // starts from what's actually showing rather than a stale draft from earlier.
+    // Unsynced -> synced: nothing to do here — _lineGroups was never touched, so the rows
+    // that reappear are already exactly what they were before the single field ever showed.
+    final wasSynced = _synced;
+    setState(() {
+      if (wasSynced) _bulkAll.text = _bulkTextFrom(_lineGroups);
+      _synced = widget.isSynced;
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final group in _lineGroups) {
+      group.dispose();
+    }
+    _bulkAll.dispose();
+    super.dispose();
+  }
+
+  void _clearAll() {
+    setState(() {
+      for (final group in _lineGroups) {
+        group.dispose();
+      }
+      _lineGroups = [_LineControllers()];
+      _bulkAll.clear();
+    });
+  }
+
+  void _save() {
+    List<LyricsLine> lines;
+    if (_synced) {
+      lines = [
+        for (final group in _lineGroups)
+          LyricsLine(
+            // Preserved from whatever this line already had — see _LineControllers'
+            // timestampMs comment and savePastedLyrics()'s doc comment for why this is what
+            // keeps correcting a synced song's text from also silently unsyncing it.
+            timestampMs: group.timestampMs,
+            original: group.original.text,
+            phonetic: group.phonetic.text,
+            translation: group.translation.text,
+          ),
+      ];
+    } else {
+      // A line's timestamp survives here if its 원문 text is still exactly what it was before
+      // this song was ever toggled into this layout — matched by content, not position, so
+      // reordering/inserting/deleting lines can't misalign anything the way position-based
+      // matching did before. Only a line whose text was actually typed/changed (or one that's
+      // brand new) loses its timing; every untouched line keeps auto-advancing normally.
+      final originalTimestampByText = <String, int?>{};
+      for (final group in _lineGroups) {
+        originalTimestampByText.putIfAbsent(
+          group.original.text,
+          () => group.timestampMs,
+        );
+      }
+      final rawLines = _bulkAll.text.split('\n');
+      lines = [
+        for (var i = 0; i < rawLines.length; i += _tiersPerLine)
+          LyricsLine(
+            timestampMs: originalTimestampByText[rawLines[i]],
+            original: rawLines[i],
+            phonetic: i + 1 < rawLines.length ? rawLines[i + 1] : null,
+            translation: i + 2 < rawLines.length ? rawLines[i + 2] : null,
+          ),
+      ];
+    }
+    widget.onSave(lines);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
+    final saving = widget.saving;
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  widget.onCancel != null ? '가사가 잘못됐나요?' : '가사를 찾을 수 없음',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 16),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _synced
+                      ? '한 줄씩 원문·독음·번역을 고치세요 — 독음/번역은 비워둬도 되고, 싱크 정보 없이 저장됩니다'
+                      : '원문·독음·번역을 3줄씩 반복해서 입력하세요 (원문/독음/번역/원문/독음/번역...) — 독음·번역 줄은 비워둬도 되고, 싱크 정보 없이 저장됩니다',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white38, fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    // A pre-filled edit can be many lines long — a single tap to start over is
+                    // faster than clearing every field by hand.
+                    onPressed: saving ? null : _clearAll,
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: Colors.white54,
+                    ),
+                    label: const Text(
+                      '전체 삭제',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (_synced)
+                  for (var i = 0; i < _lineGroups.length; i++) _buildLineRow(i)
+                else
+                  _buildField(
+                    controller: _bulkAll,
+                    hint: '가사를 여기에 붙여넣으세요',
+                    boxed: true,
+                    minLines: 10,
+                  ),
+              ],
+            ),
+          ),
+        ),
+        // Pinned below the scrolling content instead of as its last item — a long song's worth
+        // of line groups pushed this well below the fold otherwise, making 저장 reachable only
+        // after scrolling all the way down.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              MetalButton(
+                label: saving ? '저장 중...' : '저장',
+                icon: Icons.save_outlined,
+                onPressed: saving ? null : _save,
+              ),
+              if (widget.onCancel != null) ...[
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: saving ? null : widget.onCancel,
+                  child: const Text(
+                    '취소',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // No box, no border, no "N번 줄" label — three plain fields stacked directly on top of each
+  // other, the same visual rhythm _LyricRow uses to actually display a line (원문 on top,
+  // 독음 smaller/italic under it, 번역 under that), just editable instead of read-only. A
+  // divider between rows is the only thing marking where one line ends and the next begins.
+  Widget _buildLineRow(int index) {
+    final group = _lineGroups[index];
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            onCancel != null ? '가사가 잘못됐나요?' : '가사를 찾을 수 없음',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white54, fontSize: 16),
+          _buildField(
+            controller: group.original,
+            hint: '원문 (필수)',
+            style: const TextStyle(color: Colors.white, fontSize: 16),
           ),
-          const SizedBox(height: 8),
-          const Text(
-            '웹에서 찾은 가사를 붙여넣으면 이 곡에 저장돼요 (줄바꿈 기준으로 한 줄씩) — 싱크 정보 없이 원문으로만 저장됩니다',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white38, fontSize: 13),
+          const SizedBox(height: 4),
+          _buildField(
+            controller: group.phonetic,
+            hint: '독음',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 14,
+              fontStyle: FontStyle.italic,
+            ),
           ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: controller,
-            maxLines: 10,
-            minLines: 6,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              hintText: '가사를 여기에 붙여넣으세요',
-              hintStyle: const TextStyle(color: Colors.white24),
+          const SizedBox(height: 4),
+          _buildField(
+            controller: group.translation,
+            hint: '번역',
+            style: const TextStyle(color: Colors.white70, fontSize: 14),
+          ),
+          if (index < _lineGroups.length - 1) ...[
+            const SizedBox(height: 10),
+            const Divider(color: MetalTheme.edgeHighlight, height: 1),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildField({
+    required TextEditingController controller,
+    required String hint,
+    TextStyle? style,
+    // True for the paste-in layout's big block (looks like a distinct text box to drop a
+    // paste into), false for the correction layout's inline per-line fields (looks like plain
+    // text, matching how the line already reads on the actual lyrics screen).
+    bool boxed = false,
+    int? minLines,
+  }) {
+    return TextField(
+      controller: controller,
+      maxLines: null,
+      minLines: minLines,
+      style: style ?? const TextStyle(color: Colors.white, fontSize: 14),
+      decoration: boxed
+          ? InputDecoration(
+              isDense: true,
+              hintText: hint,
+              hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
               filled: true,
               fillColor: MetalTheme.surfaceDark,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 8,
+              ),
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(6),
                 borderSide: const BorderSide(
                   color: MetalTheme.edgeHighlight,
                   width: 0.6,
                 ),
               ),
+            )
+          : InputDecoration(
+              isDense: true,
+              isCollapsed: true,
+              hintText: hint,
+              hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+              border: InputBorder.none,
             ),
-          ),
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              // A pre-filled edit can be many lines long — a single tap to start over is
-              // faster than holding backspace or manually selecting everything.
-              onPressed: saving ? null : controller.clear,
-              icon: const Icon(
-                Icons.delete_outline,
-                size: 18,
-                color: Colors.white54,
-              ),
-              label: const Text(
-                '전체 삭제',
-                style: TextStyle(color: Colors.white54),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          MetalButton(
-            label: saving ? '저장 중...' : '저장',
-            icon: Icons.save_outlined,
-            onPressed: saving ? null : onSave,
-          ),
-          if (onCancel != null) ...[
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: saving ? null : onCancel,
-              child: const Text('취소', style: TextStyle(color: Colors.white54)),
-            ),
-          ],
-        ],
-      ),
     );
   }
 }

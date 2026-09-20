@@ -202,17 +202,22 @@ class _OverlayRootState extends State<OverlayRoot> {
     return delay > 0 ? delay : 0; // guard against clock weirdness, never rewind
   }
 
+  // Checked across every line, not just the first — see full_screen_lyrics_page.dart's
+  // _hasSyncData for why (an untimed leading line shouldn't disqualify an otherwise-synced song).
   bool get _isSynced =>
-      _lines.isNotEmpty &&
-      _lines.first.timestampMs != null &&
-      !_syncDisabledByUser;
+      _lines.any((line) => line.timestampMs != null) && !_syncDisabledByUser;
 
   void _recomputeCurrentIndex() {
     if (!_isSynced || _positionMs == null) return;
     final adjustedPositionMs = _positionMs! + _syncOffsetMs;
     var index = 0;
     for (var i = 0; i < _lines.length; i++) {
-      if (_lines[i].timestampMs! <= adjustedPositionMs) {
+      // A line with no timestamp of its own (an untimed leading credit/tag — see _isSynced)
+      // can't be compared against the position at all; skip it rather than crash on the null,
+      // leaving index pointed at whatever the last *timed* line still at or before now was.
+      final timestampMs = _lines[i].timestampMs;
+      if (timestampMs == null) continue;
+      if (timestampMs <= adjustedPositionMs) {
         index = i;
       } else {
         break;
@@ -481,8 +486,7 @@ class _OverlayRootState extends State<OverlayRoot> {
                                                   textAlign: TextAlign.center,
                                                   style: TextStyle(
                                                     color: Colors.white,
-                                                    fontWeight:
-                                                        FontWeight.w600,
+                                                    fontWeight: FontWeight.w600,
                                                     fontSize:
                                                         cardHeight *
                                                         _placeholderFontRatio *
@@ -498,8 +502,7 @@ class _OverlayRootState extends State<OverlayRoot> {
                                                     ? '가사 불러오는 중...'
                                                     : (_isUserPasted
                                                           ? '직접 입력한 가사 — 눌러서 전체화면으로 보기'
-                                                          : (_lines
-                                                                    .isNotEmpty
+                                                          : (_lines.isNotEmpty
                                                                 ? '싱크 없는 가사 — 눌러서 전체화면으로 보기'
                                                                 : (_trackKey !=
                                                                           null
