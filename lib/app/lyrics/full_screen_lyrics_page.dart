@@ -150,6 +150,76 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
     super.dispose();
   }
 
+  // Corrects one line's 독음/번역 in place — most commonly the on-device Kuromoji reading
+  // getting a single word wrong, which doesn't warrant discarding the whole song's sync and
+  // every other line's already-correct tiers the way the whole-song paste form would.
+  Future<void> _editLine(int index) async {
+    final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
+    if (nowPlaying == null || index < 0 || index >= _lines.length) return;
+    final line = _lines[index];
+    final phoneticController = TextEditingController(text: line.phonetic ?? '');
+    final translationController = TextEditingController(
+      text: line.translation ?? '',
+    );
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: MetalTheme.surfaceDark,
+        title: const Text('가사 줄 수정', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              line.original,
+              style: const TextStyle(color: Colors.white54, fontSize: 14),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: phoneticController,
+              autofocus: true,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: '독음',
+                labelStyle: TextStyle(color: Colors.white54),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: translationController,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: '번역',
+                labelStyle: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('저장'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true || !mounted) return;
+    final result = await widget.lyricsRepository.updateLine(
+      title: nowPlaying.title,
+      artist: nowPlaying.artist ?? '',
+      lineIndex: index,
+      phonetic: phoneticController.text,
+      translation: translationController.text,
+    );
+    if (result == null || !mounted) return;
+    setState(() => _lines = result.lines);
+    await widget.onLyricsEdited?.call(nowPlaying, result);
+  }
+
   // LRCLIB either doesn't have this song or (rarely, despite the matching safeguards) matched
   // the wrong one — this lets the user paste in lyrics they found themselves as a fallback,
   // going through the same on-device phonetic/translation pipeline a real fetch would and
@@ -158,9 +228,10 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
   Future<void> _savePastedLyrics() async {
     final text = _pasteController.text;
     final nowPlaying = _nowPlaying ?? widget.initialNowPlaying;
-    if (text.trim().isEmpty || nowPlaying == null || _savingPastedLyrics) {
-      return;
-    }
+    // Saving with nothing typed is allowed on purpose — clearing the box with "전체 삭제" and
+    // hitting save is how this song gets marked back to "no lyrics" instead of being stuck
+    // showing whatever was pasted in before.
+    if (nowPlaying == null || _savingPastedLyrics) return;
     setState(() => _savingPastedLyrics = true);
     final result = await widget.lyricsRepository.savePastedLyrics(
       title: nowPlaying.title,
@@ -173,10 +244,8 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
       _lines = result.found ? result.lines : const [];
       _isUserPasted = result.isUserPasted;
       _currentIndex = 0;
-      if (result.found) {
-        _pasteController.clear();
-        _showPasteForm = false;
-      }
+      _pasteController.clear();
+      _showPasteForm = false;
     });
     await widget.onLyricsEdited?.call(nowPlaying, result);
   }
@@ -367,7 +436,15 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
               IconButton(
                 tooltip: '가사가 틀렸나요? 직접 입력',
                 icon: const Icon(Icons.edit_note, color: Colors.white70),
-                onPressed: () => setState(() => _showPasteForm = true),
+                onPressed: () => setState(() {
+                  // Pre-fills with what's already showing (pasted or fetched) so this is an
+                  // edit of the existing text rather than a blank retype from scratch — the
+                  // auto-opened not-found case has nothing to pre-fill, so it still starts empty.
+                  _pasteController.text = _lines
+                      .map((line) => line.original)
+                      .join('\n');
+                  _showPasteForm = true;
+                }),
               ),
               if (_isUserPasted)
                 IconButton(
@@ -426,10 +503,11 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                       // small overlay's own offset control (see overlay_main.dart's
                       // _SyncOffsetButton) — separate state since the two run in different
                       // Flutter engines with no shared Dart memory.
-                      if (_isSynced) _SyncOffsetBar(
-                        offsetMs: _syncOffsetMs,
-                        onAdjust: _adjustSyncOffset,
-                      ),
+                      if (_isSynced)
+                        _SyncOffsetBar(
+                          offsetMs: _syncOffsetMs,
+                          onAdjust: _adjustSyncOffset,
+                        ),
                       Expanded(
                         child: NotificationListener<ScrollNotification>(
                           // dragDetails is only non-null for a real finger-driven drag — our
@@ -468,6 +546,7 @@ class _FullScreenLyricsPageState extends State<FullScreenLyricsPage>
                             itemBuilder: (context, index) => _LyricRow(
                               line: _lines[index],
                               isCurrent: _isSynced && index == _currentIndex,
+                              onEdit: () => _editLine(index),
                             ),
                           ),
                         ),
@@ -534,7 +613,25 @@ class _PasteLyricsForm extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              // A pre-filled edit can be many lines long — a single tap to start over is
+              // faster than holding backspace or manually selecting everything.
+              onPressed: saving ? null : controller.clear,
+              icon: const Icon(
+                Icons.delete_outline,
+                size: 18,
+                color: Colors.white54,
+              ),
+              label: const Text(
+                '전체 삭제',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
           MetalButton(
             label: saving ? '저장 중...' : '저장',
             icon: Icons.save_outlined,
@@ -594,10 +691,18 @@ class _SyncOffsetBar extends StatelessWidget {
 }
 
 class _LyricRow extends StatelessWidget {
-  const _LyricRow({required this.line, required this.isCurrent});
+  const _LyricRow({
+    required this.line,
+    required this.isCurrent,
+    required this.onEdit,
+  });
 
   final LyricsLine line;
   final bool isCurrent;
+  // Long-press to fix one line's 독음/번역 without discarding the whole song's sync — see
+  // _FullScreenLyricsPageState._editLine. Long-press rather than a plain tap since a tap is
+  // easy to trigger by accident while scrolling through the list.
+  final VoidCallback onEdit;
 
   // Ratios of screen width, calibrated against a 360dp-wide reference device (a common
   // Android baseline) to land on the same point sizes this page already used — but now
@@ -615,53 +720,58 @@ class _LyricRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
     final screenHeight = MediaQuery.of(context).size.height;
-    return Padding(
-      padding: EdgeInsets.symmetric(vertical: screenHeight * 0.0175),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            line.original,
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize:
-                  screenWidth *
-                  (isCurrent ? _originalFontRatioCurrent : _originalFontRatio),
-              fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
-            ),
-          ),
-          if (line.phonetic != null) ...[
-            SizedBox(height: screenHeight * 0.0025),
+    return InkWell(
+      onLongPress: onEdit,
+      child: Padding(
+        padding: EdgeInsets.symmetric(vertical: screenHeight * 0.0175),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             Text(
-              line.phonetic!,
+              line.original,
               style: TextStyle(
                 color: Colors.white70,
                 fontSize:
                     screenWidth *
                     (isCurrent
-                        ? _phoneticFontRatioCurrent
-                        : _phoneticFontRatio),
-                fontStyle: FontStyle.italic,
-                fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
-              ),
-            ),
-          ],
-          if (line.translation != null) ...[
-            SizedBox(height: screenHeight * 0.005),
-            Text(
-              line.translation!,
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize:
-                    screenWidth *
-                    (isCurrent
-                        ? _translationFontRatioCurrent
-                        : _translationFontRatio),
+                        ? _originalFontRatioCurrent
+                        : _originalFontRatio),
                 fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
               ),
             ),
+            if (line.phonetic != null) ...[
+              SizedBox(height: screenHeight * 0.0025),
+              Text(
+                line.phonetic!,
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize:
+                      screenWidth *
+                      (isCurrent
+                          ? _phoneticFontRatioCurrent
+                          : _phoneticFontRatio),
+                  fontStyle: FontStyle.italic,
+                  fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
+                ),
+              ),
+            ],
+            if (line.translation != null) ...[
+              SizedBox(height: screenHeight * 0.005),
+              Text(
+                line.translation!,
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize:
+                      screenWidth *
+                      (isCurrent
+                          ? _translationFontRatioCurrent
+                          : _translationFontRatio),
+                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

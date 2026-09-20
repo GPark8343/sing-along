@@ -67,9 +67,9 @@ class LyricsRepository {
     LrclibClient? lrclibClient,
     JapaneseReadingClient? phoneticClient,
     DeepLClient? deepLClient,
-  })  : _lrclibClient = lrclibClient ?? LrclibClient(),
-        _phoneticClient = phoneticClient ?? JapaneseReadingClient(),
-        _deepLClient = deepLClient ?? DeepLClient();
+  }) : _lrclibClient = lrclibClient ?? LrclibClient(),
+       _phoneticClient = phoneticClient ?? JapaneseReadingClient(),
+       _deepLClient = deepLClient ?? DeepLClient();
 
   final Box<CachedLyricsEntry> _cacheBox;
   final LrclibClient _lrclibClient;
@@ -85,7 +85,11 @@ class LyricsRepository {
     final cached = _cacheBox.get(key);
     if (cached != null) return _fromCache(cached);
 
-    final result = await _fetchFresh(title: title, artist: artist, durationSeconds: durationSeconds);
+    final result = await _fetchFresh(
+      title: title,
+      artist: artist,
+      durationSeconds: durationSeconds,
+    );
     await _cacheBox.put(key, _toCache(result));
     return result;
   }
@@ -109,7 +113,11 @@ class LyricsRepository {
     int? durationSeconds,
   }) async {
     final key = TitleNormalizer.cacheKey(title, artist);
-    final result = await _fetchFresh(title: title, artist: artist, durationSeconds: durationSeconds);
+    final result = await _fetchFresh(
+      title: title,
+      artist: artist,
+      durationSeconds: durationSeconds,
+    );
     await _cacheBox.put(key, _toCache(result));
     return result;
   }
@@ -135,7 +143,10 @@ class LyricsRepository {
     final result = LyricsResult(
       found: true,
       isUserPasted: true,
-      lines: [for (final text in originalTexts) LyricsLine(timestampMs: null, original: text)],
+      lines: [
+        for (final text in originalTexts)
+          LyricsLine(timestampMs: null, original: text),
+      ],
     );
     final key = TitleNormalizer.cacheKey(title, artist);
     await _cacheBox.put(key, _toCache(result));
@@ -194,7 +205,10 @@ class LyricsRepository {
 
     if (lrclib == null || !lrclib.hasLyrics) return LyricsResult.notFound;
 
-    final parsedLines = LrcParser.parse(lrclib.plainLyrics, lrclib.syncedLyrics);
+    final parsedLines = LrcParser.parse(
+      lrclib.plainLyrics,
+      lrclib.syncedLyrics,
+    );
     if (parsedLines.isEmpty) return LyricsResult.notFound;
 
     return _buildResult(
@@ -209,7 +223,10 @@ class LyricsRepository {
   // phonetic reading (Japanese via Kuromoji, Spanish via rule-based transliteration) + DeepL
   // translation pipeline over whatever original-language lines it's handed, whether they came
   // with LRC timestamps or not.
-  Future<LyricsResult> _buildResult(List<String> originalTexts, List<int?> timestamps) async {
+  Future<LyricsResult> _buildResult(
+    List<String> originalTexts,
+    List<int?> timestamps,
+  ) async {
     // Classified one line at a time, not once for the whole song — a song can freely mix
     // Japanese/Spanish/English/other lines, and each only gets the phonetic tier that's
     // actually right for its own language (an English line gets none at all, the same way a
@@ -234,7 +251,8 @@ class LyricsRepository {
         maybeSpanishIndices.add(i);
       }
     }
-    final confidentNonJapaneseCount = originalTexts.length - japaneseIndices.length;
+    final confidentNonJapaneseCount =
+        originalTexts.length - japaneseIndices.length;
     if (confidentNonJapaneseCount > 0 &&
         spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
       spanishIndices.addAll(maybeSpanishIndices);
@@ -256,7 +274,11 @@ class LyricsRepository {
 
     final readings = List<String?>.filled(originalTexts.length, null);
     if (japaneseReadings != null) {
-      for (var k = 0; k < japaneseIndices.length && k < japaneseReadings.length; k++) {
+      for (
+        var k = 0;
+        k < japaneseIndices.length && k < japaneseReadings.length;
+        k++
+      ) {
         readings[japaneseIndices[k]] = japaneseReadings[k];
       }
     }
@@ -281,7 +303,8 @@ class LyricsRepository {
   // An empty/whitespace string isn't null, so without this a tier that came
   // back blank for one particular line would render as a visible blank row
   // instead of being omitted like a genuinely missing tier.
-  String? _nonEmpty(String? text) => (text != null && text.trim().isNotEmpty) ? text : null;
+  String? _nonEmpty(String? text) =>
+      (text != null && text.trim().isNotEmpty) ? text : null;
 
   LyricsResult _fromCache(CachedLyricsEntry entry) {
     return LyricsResult(
@@ -341,5 +364,44 @@ class LyricsRepository {
         lines: existing.lines,
       ),
     );
+  }
+
+  // Corrects a single line's 독음/번역 in place — the original text and its timestamp are left
+  // untouched, so a fetched song's sync and every other line stay exactly as they were. Useful
+  // for the common case of the on-device Kuromoji reading getting one word wrong, where
+  // discarding the whole song via savePastedLyrics()/refetchFromApi() would be needless. A
+  // no-op if the index no longer lines up with what's cached (the song changed underneath, or
+  // nothing's cached for this key at all).
+  Future<LyricsResult?> updateLine({
+    required String title,
+    required String artist,
+    required int lineIndex,
+    String? phonetic,
+    String? translation,
+  }) async {
+    final key = TitleNormalizer.cacheKey(title, artist);
+    final existing = _cacheBox.get(key);
+    if (existing == null ||
+        lineIndex < 0 ||
+        lineIndex >= existing.lines.length) {
+      return null;
+    }
+    final updatedLines = List<CachedLyricLine>.from(existing.lines);
+    final old = updatedLines[lineIndex];
+    updatedLines[lineIndex] = CachedLyricLine(
+      timestampMs: old.timestampMs,
+      original: old.original,
+      phonetic: _nonEmpty(phonetic),
+      translation: _nonEmpty(translation),
+    );
+    final updated = CachedLyricsEntry(
+      found: existing.found,
+      cachedAt: existing.cachedAt,
+      isUserPasted: existing.isUserPasted,
+      syncOffsetMs: existing.syncOffsetMs,
+      lines: updatedLines,
+    );
+    await _cacheBox.put(key, updated);
+    return _fromCache(updated);
   }
 }
