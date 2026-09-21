@@ -271,17 +271,20 @@ class LyricsRepository {
         spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
       spanishIndices.addAll(maybeSpanishIndices);
     }
-    // Everything left over — not Japanese, not (confidently or promoted) Spanish — goes to
-    // the English translator. ML Kit needs a fixed source language per translator, unlike the
-    // old cloud APIs that auto-detected it per call, so an unclassified line has to default to
-    // *something*; English is both the common case for what's actually left (an English
-    // chorus in an otherwise-Japanese song, an all-English song) and close enough for other
-    // Latin-script languages this app doesn't have a dedicated detector for.
+    // Everything left over — not Japanese, not (confidently or promoted) Spanish — is further
+    // split into German vs English by ML Kit's own language identifier (see
+    // MlKitTranslationClient.classifyGermanVsEnglish) rather than a hand-written detector: a
+    // dedicated JapaneseDetector/SpanishDetector per language stopped scaling once a *second*
+    // non-Japanese language needed telling apart from English.
     final skipTranslation = {...japaneseIndices, ...spanishIndices};
-    final englishIndices = [
+    final remainingIndices = [
       for (var i = 0; i < originalTexts.length; i++)
         if (!skipTranslation.contains(i)) i,
     ];
+    final germanEnglishSplit =
+        await _translationClient.classifyGermanVsEnglish(remainingIndices, originalTexts);
+    final germanIndices = germanEnglishSplit.german;
+    final englishIndices = germanEnglishSplit.english;
 
     Future<List<String>?> fetchJapaneseReadings() {
       if (japaneseIndices.isEmpty) return Future.value(null);
@@ -304,14 +307,32 @@ class LyricsRepository {
       ]);
     }
 
+    Future<List<String>?> fetchSpanishTranslations() {
+      if (spanishIndices.isEmpty) return Future.value(null);
+      return _translationClient.translateSpanishLines([
+        for (final i in spanishIndices) originalTexts[i],
+      ]);
+    }
+
+    Future<List<String>?> fetchGermanTranslations() {
+      if (germanIndices.isEmpty) return Future.value(null);
+      return _translationClient.translateGermanLines([
+        for (final i in germanIndices) originalTexts[i],
+      ]);
+    }
+
     final results = await Future.wait([
       fetchJapaneseReadings(),
       fetchJapaneseTranslations(),
       fetchEnglishTranslations(),
+      fetchSpanishTranslations(),
+      fetchGermanTranslations(),
     ]);
     final japaneseReadings = results[0];
     final japaneseTranslations = results[1];
     final englishTranslations = results[2];
+    final spanishTranslations = results[3];
+    final germanTranslations = results[4];
 
     final readings = List<String?>.filled(originalTexts.length, null);
     if (japaneseReadings != null) {
@@ -346,6 +367,24 @@ class LyricsRepository {
         k++
       ) {
         translations[englishIndices[k]] = englishTranslations[k];
+      }
+    }
+    if (spanishTranslations != null) {
+      for (
+        var k = 0;
+        k < spanishIndices.length && k < spanishTranslations.length;
+        k++
+      ) {
+        translations[spanishIndices[k]] = spanishTranslations[k];
+      }
+    }
+    if (germanTranslations != null) {
+      for (
+        var k = 0;
+        k < germanIndices.length && k < germanTranslations.length;
+        k++
+      ) {
+        translations[germanIndices[k]] = germanTranslations[k];
       }
     }
 
