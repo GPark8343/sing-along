@@ -490,8 +490,8 @@ class LrclibClient {
     final lyrics = (syncedLyrics?.trim().isNotEmpty ?? false)
         ? syncedLyrics!
         : (result['plainLyrics'] as String? ?? '');
-    if (lyrics.trim().isEmpty || JapaneseDetector.isJapanese(lyrics)) {
-      return false; // empty, or already has real kana — nothing to flag
+    if (lyrics.trim().isEmpty || _looksProperlyJapanese(lyrics)) {
+      return false; // empty, or genuinely Japanese-scripted throughout — nothing to flag
     }
     if (JapaneseDetector.isJapanese(queryTitle)) return true;
     final recordTitle = (result['trackName'] as String?) ?? '';
@@ -501,6 +501,20 @@ class LrclibClient {
     return recordIsJapanese ||
         JapaneseDetector.looksLikeRomanizedJapanese(lyrics) ||
         JapaneseDetector.looksLikeJapaneseName(queryArtist);
+  }
+
+  // A single scattered kana character anywhere in the whole blob used to be enough to call a
+  // submission "already Japanese-scripted" — but some contributors submit a mostly-romanized
+  // transcription with one stray line transcribed in kana (an ad-lib/backing-vocal line, seen
+  // in the wild on Ado's "AiAiA": 14 romaji lines and exactly one real-kana line), which that
+  // single whole-text check waved through as fine. Requiring a majority of non-empty lines to
+  // contain kana instead means an isolated kana line can no longer vouch for an otherwise
+  // fully-romanized submission.
+  bool _looksProperlyJapanese(String lyrics) {
+    final lines = lyrics.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    if (lines.isEmpty) return false;
+    final kanaLines = lines.where(JapaneseDetector.isJapanese).length;
+    return kanaLines / lines.length >= 0.5;
   }
 
   // Some LRCLIB submissions have production-credit lines (lyricist/composer, sometimes a
