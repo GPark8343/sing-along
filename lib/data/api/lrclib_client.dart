@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 
+import '../../core/text/hangul_romanizer.dart';
 import '../../core/text/japanese_detector.dart';
 
 /// Raw lyrics as returned by LRCLIB — no auth/rate limit, so no key handling
@@ -54,6 +55,35 @@ class LrclibClient {
     required String artistName,
     int? durationSeconds,
   }) async {
+    final result = await _fetchLyricsOnce(trackName, artistName, durationSeconds);
+    if (result != null) return result;
+    // Some Korean media apps substitute the title and/or artist with its Hangul *phonetic
+    // reading* for a Korean audience instead of the original spelling — "아도" for "Ado",
+    // "레이도메이도" for some Japanese/English title — which shares no characters at all with
+    // LRCLIB's own Latin/Japanese-script fields no matter how correct the match is. A plain
+    // query against that Hangul text was never going to find anything, so this doesn't run
+    // unless it already didn't: reverse any Hangul in either field back to its approximate
+    // Latin spelling (a real transliteration, not a lookup table — see HangulRomanizer) and
+    // retry the exact same lookup once with that instead, going through every one of the
+    // normal similarity/mismatch safeguards below just like any other query would. Kept
+    // sequential, not raced against the original attempt — each attempt already fires several
+    // requests of its own, and running two full copies at once was found to overwhelm a real
+    // mobile connection (everything started timing out) rather than actually finishing faster.
+    final hasHangul = HangulRomanizer.containsHangul(trackName) ||
+        HangulRomanizer.containsHangul(artistName);
+    if (!hasHangul) return null;
+    return _fetchLyricsOnce(
+      HangulRomanizer.romanize(trackName),
+      HangulRomanizer.romanize(artistName),
+      durationSeconds,
+    );
+  }
+
+  Future<LrclibLyrics?> _fetchLyricsOnce(
+    String trackName,
+    String artistName,
+    int? durationSeconds,
+  ) async {
     final exact = await _getExact(trackName, artistName, durationSeconds) ??
         await _getExact(trackName, artistName, null);
 

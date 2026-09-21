@@ -107,6 +107,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _expandRequestInFlight = false;
   bool _toggleInFlight = false;
   Timer? _stopDebounceTimer;
+  // Some apps settle on a track's real title in stages — a short/partial string first, then
+  // the full one a moment later (e.g. "Usseewa" then "うっせぇわ - Usseewa") — each of which is
+  // a genuinely different trackKey (title alone, see NowPlaying.trackKey), so without this a
+  // single song play was fetching AND caching twice under two different keys, leaving two
+  // separate "최근 들은 곡" entries for what's really one song. Debouncing here waits for the
+  // title to stop changing before committing to a fetch, the same way _fetchLyricsFor already
+  // waits out a blank-artist transition below — this just generalizes that to titles too.
+  Timer? _trackChangeDebounceTimer;
   // trackKey of the most recently requested lyrics fetch — lets a fetch that's still running
   // when a newer track change starts recognize it's now stale once it finally completes.
   String? _latestRequestedTrackKey;
@@ -177,6 +185,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _trackChangeSubscription?.cancel();
     _overlayMessageSubscription?.cancel();
     _stopDebounceTimer?.cancel();
+    _trackChangeDebounceTimer?.cancel();
     _songSearchController.dispose();
     _songSearchFocusNode.dispose();
     super.dispose();
@@ -291,7 +300,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // playing when the overlay/app becomes visible again gets caught up then (see
     // _catchUpLyricsIfNeeded), so nothing is permanently missed, just deferred.
     if (!_shouldFetchLyrics) return;
-    await _fetchLyricsFor(nowPlaying);
+    // Sent right away, not held behind the debounce below — the overlay/full-screen page only
+    // start tracking *this* song's position once they see its trackKey (see overlay_main.dart's
+    // _onPosition guard), so delaying this ping by the same 500ms as the fetch left the
+    // position display frozen on the *previous* song for that whole window every time a new
+    // track started — a real, sustained-feeling "1 second behind" right at the start of nearly
+    // every song, not the occasional debounce-driven double-fetch this was meant to prevent.
+    await FlutterOverlayWindow.shareData({
+      'type': 'lyrics',
+      'loading': true,
+      'trackKey': nowPlaying.trackKey,
+      'title': nowPlaying.title,
+      'artist': nowPlaying.artist ?? '',
+    });
+    // Wait out any further title changes before actually fetching — see
+    // _trackChangeDebounceTimer's own comment for why a single song can otherwise trigger this
+    // twice. Reads _nowPlaying (kept fresh by the position stream, independent of this trackKey
+    // check) at fire time rather than the possibly-stale `nowPlaying` captured here, so a title
+    // that settles within the debounce window is picked up automatically.
+    final requestedTrackKey = nowPlaying.trackKey;
+    _trackChangeDebounceTimer?.cancel();
+    _trackChangeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!_shouldFetchLyrics) return; // overlay/app got closed while this was waiting
+      final latest = _nowPlaying;
+      if (latest == null || latest.trackKey != requestedTrackKey) {
+        return; // superseded by yet another title change before this one settled
+      }
+      // Some apps' MediaSession metadata briefly glitches mid-playback (a position that
+      // jumps to equal the duration, a transient blank state) — that resets trackChanges'
+      // own dedup (see NowPlaying.trackKey), so the exact same song can fire *another* "track
+      // changed" event seconds after the first one, well outside this debounce window. Without
+      // this check, that second event would trigger a whole second fetch (or at best a
+      // pointless cache-hit round trip) for a song already showing correctly, flashing the
+      // overlay back to "loading" and right back to "found" for no reason — which is what
+      // actually looked like a broken state transition, not slowness.
+      if (latest.trackKey == _fetchedTrackKey) return;
+      _fetchLyricsFor(latest);
+    });
   }
 
   bool get _shouldFetchLyrics => _overlayActive || _isAppVisible;
