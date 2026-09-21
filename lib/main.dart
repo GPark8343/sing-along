@@ -300,6 +300,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // playing when the overlay/app becomes visible again gets caught up then (see
     // _catchUpLyricsIfNeeded), so nothing is permanently missed, just deferred.
     if (!_shouldFetchLyrics) return;
+    // Some apps' MediaSession metadata briefly glitches mid-playback (a position that jumps to
+    // equal the duration, a transient blank state) — that resets trackChanges' own dedup (see
+    // NowPlaying.trackKey), so the exact same, already-resolved song can fire *another* "track
+    // changed" event. If the unconditional loading ping below always fired first, that glitch
+    // would flash the overlay to "loading" and then — since the debounce below deliberately
+    // skips re-fetching a trackKey that's already resolved — just leave it stuck there forever,
+    // showing "가사 불러오는 중..." for a song the app actually already has the answer for. Resend
+    // what's already known instead of a loading ping whenever that's the case, so the glitch
+    // self-corrects immediately rather than needing an actual (skipped) fetch to clear it.
+    if (nowPlaying.trackKey == _fetchedTrackKey) {
+      // A slower fetch for a *different* song (started earlier, e.g. one that took the full
+      // not-found cascade) may still be in flight right now — it only checks
+      // _latestRequestedTrackKey against its own trackKey when it eventually resolves (see
+      // _fetchLyricsFor), so without updating it here too, that stale fetch would still look
+      // "current" once it lands and clobber the correct resend below with old data for a song
+      // that isn't even playing anymore.
+      _latestRequestedTrackKey = nowPlaying.trackKey;
+      final payload = _lastLyricsPayload;
+      if (payload != null) {
+        // This trackKey being already resolved means we're *not* fetching anything right
+        // now — whatever's being resent here is, by definition, already-known/saved data
+        // (the original fetch's own `fromCache` flag reflects whether *that* particular
+        // fetch was a cache hit, which is stale info by now and often still `false` from a
+        // song's very first play — without this override the small overlay's "저장됨" badge
+        // would then just never show for a song replayed within the same app session, even
+        // though it very much is saved by this point).
+        await FlutterOverlayWindow.shareData({...payload, 'fromCache': true});
+      }
+      return;
+    }
     // Sent right away, not held behind the debounce below — the overlay/full-screen page only
     // start tracking *this* song's position once they see its trackKey (see overlay_main.dart's
     // _onPosition guard), so delaying this ping by the same 500ms as the fetch left the
@@ -334,7 +364,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // pointless cache-hit round trip) for a song already showing correctly, flashing the
       // overlay back to "loading" and right back to "found" for no reason — which is what
       // actually looked like a broken state transition, not slowness.
-      if (latest.trackKey == _fetchedTrackKey) return;
+      if (latest.trackKey == _fetchedTrackKey) {
+        // Same reasoning as the earlier dedup check above — an older, slower fetch for a
+        // *different* song may still be in flight, and it only recognizes itself as stale by
+        // comparing against _latestRequestedTrackKey when it resolves. Not updating it here
+        // just because this particular event turned out to be a no-op glitch would leave that
+        // older fetch free to land later and overwrite whatever's correctly showing now.
+        _latestRequestedTrackKey = latest.trackKey;
+        return;
+      }
       _fetchLyricsFor(latest);
     });
   }

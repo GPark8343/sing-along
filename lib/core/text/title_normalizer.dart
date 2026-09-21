@@ -61,7 +61,10 @@ class TitleNormalizer {
 
   static final RegExp _topicSuffix = RegExp(r'\s*-\s*topic$', caseSensitive: false);
   static final RegExp _vevoSuffix = RegExp(r'\s*vevo$', caseSensitive: false);
-  static final RegExp _multiArtistSplit = RegExp(r'\s*(?:,|&|/| x | X |feat\.?|ft\.?|featuring)\s*');
+  // "및" is Korean for "and" — some apps localize a multi-artist credit as "Novelbright 및
+  // Vaundy" for Korean-region users instead of "&"/"," the way they would for other locales.
+  static final RegExp _multiArtistSplit =
+      RegExp(r'\s*(?:,|&|/| x | X | 및 |feat\.?|ft\.?|featuring)\s*');
 
   /// The single primary artist LRCLIB is most likely indexed under — the
   /// first name out of however many the notification's artist field lists.
