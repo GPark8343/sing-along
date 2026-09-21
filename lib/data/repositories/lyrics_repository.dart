@@ -5,17 +5,17 @@ import '../../core/text/lrc_parser.dart';
 import '../../core/text/spanish_detector.dart';
 import '../../core/text/spanish_hangul.dart';
 import '../../core/text/title_normalizer.dart';
-import '../api/deepl_client.dart';
 import '../api/lrclib_client.dart';
+import '../api/ml_kit_translation_client.dart';
 import '../hive/models/cached_lyric_line.dart';
 import '../hive/models/cached_lyrics_entry.dart';
 import '../native/japanese_reading_bridge.dart';
 
 /// One lyric line with whichever tiers were actually available. [phonetic]
 /// is only ever set for Japanese songs (computed on-device, no key needed);
-/// [translation] only with a DeepL key configured — either can be null
-/// independently of the other, and the overlay just omits a tier that's
-/// null rather than showing a placeholder for it.
+/// [translation] is set for Japanese and English lines (on-device via ML
+/// Kit) — Spanish lines get neither for now, and the overlay just omits a
+/// tier that's null rather than showing a placeholder for it.
 class LyricsLine {
   final int? timestampMs;
   final String original;
@@ -58,7 +58,7 @@ class LyricsResult {
 /// before — including one that turned out to have no lyrics, so a
 /// not-found song doesn't get re-queried every time it plays), then on a
 /// miss, LRCLIB for the original text with an on-device Japanese reading
-/// (독음) and DeepL translation layered on top — each best-effort and
+/// (독음) and on-device translation layered on top — each best-effort and
 /// independently optional, never blocking the other or the original
 /// lyrics themselves.
 class LyricsRepository {
@@ -66,15 +66,15 @@ class LyricsRepository {
     required this._cacheBox,
     LrclibClient? lrclibClient,
     JapaneseReadingClient? phoneticClient,
-    DeepLClient? deepLClient,
+    MlKitTranslationClient? translationClient,
   }) : _lrclibClient = lrclibClient ?? LrclibClient(),
        _phoneticClient = phoneticClient ?? JapaneseReadingClient(),
-       _deepLClient = deepLClient ?? DeepLClient();
+       _translationClient = translationClient ?? MlKitTranslationClient();
 
   final Box<CachedLyricsEntry> _cacheBox;
   final LrclibClient _lrclibClient;
   final JapaneseReadingClient _phoneticClient;
-  final DeepLClient _deepLClient;
+  final MlKitTranslationClient _translationClient;
 
   Future<LyricsResult> getLyrics({
     required String title,
@@ -126,7 +126,7 @@ class LyricsRepository {
   /// kept together per line rather than as three parallel blocks of text) — either a fresh
   /// paste-in (LRCLIB matched the wrong song, or didn't have this one at all) or a correction
   /// of a few lines in an already-synced song. Skips the phonetic/translation *pipeline* (no
-  /// on-device Kuromoji pass, no DeepL call) since the user is providing that text directly.
+  /// on-device Kuromoji/ML Kit calls) since the user is providing that text directly.
   /// Each [LyricsLine.timestampMs] is trusted as given rather than forced to null — the
   /// whole-song correction layout preserves a synced song's original per-line timestamps when
   /// it builds [lines], while the paste-in layout never has any to begin with, so this doesn't
@@ -234,9 +234,9 @@ class LyricsRepository {
   }
 
   // Shared by both a fresh LRCLIB fetch and a user-pasted paste-in: runs the on-device
-  // phonetic reading (Japanese via Kuromoji, Spanish via rule-based transliteration) + DeepL
-  // translation pipeline over whatever original-language lines it's handed, whether they came
-  // with LRC timestamps or not.
+  // phonetic reading (Japanese via Kuromoji, Spanish via rule-based transliteration) + on-
+  // device translation pipeline over whatever original-language lines it's handed, whether
+  // they came with LRC timestamps or not.
   Future<LyricsResult> _buildResult(
     List<String> originalTexts,
     List<int?> timestamps,
@@ -271,6 +271,17 @@ class LyricsRepository {
         spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
       spanishIndices.addAll(maybeSpanishIndices);
     }
+    // Everything left over — not Japanese, not (confidently or promoted) Spanish — goes to
+    // the English translator. ML Kit needs a fixed source language per translator, unlike the
+    // old cloud APIs that auto-detected it per call, so an unclassified line has to default to
+    // *something*; English is both the common case for what's actually left (an English
+    // chorus in an otherwise-Japanese song, an all-English song) and close enough for other
+    // Latin-script languages this app doesn't have a dedicated detector for.
+    final skipTranslation = {...japaneseIndices, ...spanishIndices};
+    final englishIndices = [
+      for (var i = 0; i < originalTexts.length; i++)
+        if (!skipTranslation.contains(i)) i,
+    ];
 
     Future<List<String>?> fetchJapaneseReadings() {
       if (japaneseIndices.isEmpty) return Future.value(null);
@@ -279,12 +290,28 @@ class LyricsRepository {
       ]);
     }
 
+    Future<List<String>?> fetchJapaneseTranslations() {
+      if (japaneseIndices.isEmpty) return Future.value(null);
+      return _translationClient.translateJapaneseLines([
+        for (final i in japaneseIndices) originalTexts[i],
+      ]);
+    }
+
+    Future<List<String>?> fetchEnglishTranslations() {
+      if (englishIndices.isEmpty) return Future.value(null);
+      return _translationClient.translateEnglishLines([
+        for (final i in englishIndices) originalTexts[i],
+      ]);
+    }
+
     final results = await Future.wait([
       fetchJapaneseReadings(),
-      _deepLClient.translateLines(originalTexts),
+      fetchJapaneseTranslations(),
+      fetchEnglishTranslations(),
     ]);
     final japaneseReadings = results[0];
-    final translations = results[1];
+    final japaneseTranslations = results[1];
+    final englishTranslations = results[2];
 
     final readings = List<String?>.filled(originalTexts.length, null);
     if (japaneseReadings != null) {
@@ -302,13 +329,33 @@ class LyricsRepository {
       readings[i] = SpanishHangul.transliterateLine(originalTexts[i]);
     }
 
+    final translations = List<String?>.filled(originalTexts.length, null);
+    if (japaneseTranslations != null) {
+      for (
+        var k = 0;
+        k < japaneseIndices.length && k < japaneseTranslations.length;
+        k++
+      ) {
+        translations[japaneseIndices[k]] = japaneseTranslations[k];
+      }
+    }
+    if (englishTranslations != null) {
+      for (
+        var k = 0;
+        k < englishIndices.length && k < englishTranslations.length;
+        k++
+      ) {
+        translations[englishIndices[k]] = englishTranslations[k];
+      }
+    }
+
     final lines = <LyricsLine>[
       for (var i = 0; i < originalTexts.length; i++)
         LyricsLine(
           timestampMs: i < timestamps.length ? timestamps[i] : null,
           original: originalTexts[i],
           phonetic: _nonEmpty(readings[i]),
-          translation: _nonEmpty(translations != null ? translations[i] : null),
+          translation: _nonEmpty(translations[i]),
         ),
     ];
     return LyricsResult(found: true, lines: lines);

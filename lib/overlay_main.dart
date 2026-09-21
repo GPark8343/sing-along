@@ -27,7 +27,7 @@ class _LyricLine {
   final String original;
   final String?
   phonetic; // Japanese songs only — computed on-device, no key needed
-  final String? translation; // once a DeepL key is configured
+  final String? translation; // Japanese/English lines only, via on-device ML Kit
 
   const _LyricLine({
     required this.timestampMs,

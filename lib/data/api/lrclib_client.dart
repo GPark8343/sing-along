@@ -5,7 +5,7 @@ import '../../core/text/japanese_detector.dart';
 import '../../core/text/title_normalizer.dart';
 
 /// Raw lyrics as returned by LRCLIB — no auth/rate limit, so no key handling
-/// needed for this leg of the pipeline (unlike Goo Lab/DeepL later).
+/// needed for this leg of the pipeline (unlike the Gemini translation step later).
 class LrclibLyrics {
   final String? plainLyrics;
   final String? syncedLyrics; // LRC text: "[mm:ss.xx] line" per line, when available
