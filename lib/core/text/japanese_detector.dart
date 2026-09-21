@@ -12,6 +12,15 @@ class JapaneseDetector {
 
   static final RegExp _wordPattern = RegExp(r"[A-Za-z']+");
 
+  // Accented Latin letters that never appear in Hepburn-style romaji (which is plain ASCII
+  // a-z only) but show up constantly in Portuguese/Spanish/French/etc. lyrics — "não",
+  // "batidão", "coração". A vowel-heavy Romance-language song can otherwise trip the
+  // vowel-ending-ratio check below almost as easily as real romaji does, and short
+  // prepositions like Portuguese "no"/"da" collide with genuine romaji particles ("no" as in
+  // の, "da" as in だ), so this is checked first as a hard veto rather than folded into the
+  // scoring — any of these characters is proof by itself that the text isn't romaji.
+  static final RegExp _romanceDiacritics = RegExp('[àáâãäçèéêëìíîïñòóôõöùúûüýÀÁÂÃÄÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ]');
+
   // Function words/particles that show up constantly in romanized Japanese but are
   // essentially never standalone English words on their own — "wo" in particular is
   // basically exclusive to romaji (the を particle), not a real English word.
@@ -27,6 +36,7 @@ class JapaneseDetector {
   /// (1) most "words" end in a vowel or 'n' — Japanese mora structure requires that, English
   /// doesn't — and (2) at least two standalone tokens are common Japanese particles.
   static bool looksLikeRomanizedJapanese(String text) {
+    if (_romanceDiacritics.hasMatch(text)) return false;
     final words = _wordPattern
         .allMatches(text)
         .map((m) => m.group(0)!)
