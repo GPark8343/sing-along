@@ -6,6 +6,14 @@
 class TitleNormalizer {
   TitleNormalizer._();
 
+  // Some Korean-region apps append a Hangul pronunciation guide right after a foreign
+  // name — "Luis Fonsi(루이스 폰시)", "Justin Bieber(저스틴 비버)" — which LRCLIB's own
+  // metadata never has any idea about. Matched by content (parens containing *only* Hangul
+  // and whitespace) rather than needing to know which names this happens to, so it strips
+  // cleanly wherever it shows up — including nested inside a "(feat. X(...))" clause, before
+  // _featureClause/_multiArtistSplit below ever have to deal with it.
+  static final RegExp _hangulReadingParen = RegExp(r'[([（][가-힣\s]+[)\]）]');
+
   static final RegExp _liveMarkerPattern = RegExp(
     r'\s*[-–]\s*live\b.*$|\s*\(live[^)]*\)|\s*\[live[^\]]*\]',
     caseSensitive: false,
@@ -34,6 +42,7 @@ class TitleNormalizer {
 
   static String normalizeTitle(String title) {
     var result = title;
+    result = result.replaceAll(_hangulReadingParen, '');
     result = result.replaceAll(_liveMarkerPattern, '');
     result = result.replaceAll(_noiseBracket, '');
     result = result.replaceAll(_featureClause, '');
@@ -70,12 +79,41 @@ class TitleNormalizer {
   /// first name out of however many the notification's artist field lists.
   static String primaryArtist(String artist) {
     var result = artist;
+    result = result.replaceAll(_hangulReadingParen, '');
     result = result.replaceAll(_topicSuffix, '');
     result = result.replaceAll(_vevoSuffix, '');
     result = result.replaceAll(_whitespace, ' ').trim();
     final parts = result.split(_multiArtistSplit);
     final first = parts.firstWhere((part) => part.trim().isNotEmpty, orElse: () => result);
     return first.trim();
+  }
+
+  // Captures whatever follows "feat."/"ft."/"featuring" up to a closing bracket or the end of
+  // the string — used to pull the featured artist's name back out before normalizeTitle()/
+  // primaryArtist() above discard the clause entirely.
+  static final RegExp _featureCapture = RegExp(
+    r'[-([]?\s*(?:feat\.?|ft\.?|featuring)\s+([^)\]]+)[)\]]?',
+    caseSensitive: false,
+  );
+
+  /// The featured artist named in a "(feat. X)"/"feat. X" clause, checked in the title first
+  /// and then the artist field (a title's own parenthetical is the more common place to see
+  /// one) — or null if neither has one. `(feat. X)` means a *specific person actually guested
+  /// on this recording*, not just "any song with a similar title/artist" the way a co-equal
+  /// multi-artist credit does, so this is kept separate from primaryArtist()'s plain discard:
+  /// callers can use it to verify an LRCLIB match's own trackName/artistName actually mentions
+  /// that guest too, rather than silently accepting a different recording without them.
+  static String? featuredArtist(String title, String artist) {
+    // Stripped first so a nested Hangul reading — "(feat. Justin Bieber(저스틴 비버))" —
+    // doesn't get swept into the captured name; without this the capture (which stops at the
+    // first closing bracket) would grab "Justin Bieber(저스틴 비버" instead of just the name.
+    final cleanTitle = title.replaceAll(_hangulReadingParen, '');
+    final cleanArtist = artist.replaceAll(_hangulReadingParen, '');
+    final fromTitle = _featureCapture.firstMatch(cleanTitle)?.group(1)?.trim();
+    if (fromTitle != null && fromTitle.isNotEmpty) return fromTitle;
+    final fromArtist = _featureCapture.firstMatch(cleanArtist)?.group(1)?.trim();
+    if (fromArtist != null && fromArtist.isNotEmpty) return fromArtist;
+    return null;
   }
 
   /// The Hive cache key for a song — same normalization as the LRCLIB

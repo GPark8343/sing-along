@@ -171,6 +171,7 @@ class LyricsRepository {
   }) async {
     final artistName = TitleNormalizer.primaryArtist(artist);
     final isLive = TitleNormalizer.isLiveTitle(title);
+    final featuredArtist = TitleNormalizer.featuredArtist(title, artist);
 
     LrclibLyrics? lrclib;
     var forceUnsynced = false;
@@ -183,6 +184,7 @@ class LyricsRepository {
         trackName: title,
         artistName: artistName,
         durationSeconds: durationSeconds,
+        featuredArtist: featuredArtist,
       );
     }
 
@@ -191,6 +193,7 @@ class LyricsRepository {
         trackName: TitleNormalizer.normalizeTitle(title),
         artistName: artistName,
         durationSeconds: durationSeconds,
+        featuredArtist: featuredArtist,
       );
       // Whatever came back here is, at best, the studio recording's timing — a live
       // performance's actual pacing (extended intros, ad-libs, crowd noise, tempo drift)

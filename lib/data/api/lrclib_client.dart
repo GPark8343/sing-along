@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 
 import '../../core/text/hangul_romanizer.dart';
 import '../../core/text/japanese_detector.dart';
+import '../../core/text/title_normalizer.dart';
 
 /// Raw lyrics as returned by LRCLIB — no auth/rate limit, so no key handling
 /// needed for this leg of the pipeline (unlike Goo Lab/DeepL later).
@@ -42,8 +43,9 @@ class LrclibClient {
     required String trackName,
     required String artistName,
     int? durationSeconds,
+    String? featuredArtist,
   }) async {
-    final result = await _fetchLyricsOnce(trackName, artistName, durationSeconds);
+    final result = await _fetchLyricsOnce(trackName, artistName, durationSeconds, featuredArtist);
     if (result != null) return result;
     // Some Korean media apps substitute the title and/or artist with its Hangul *phonetic
     // reading* for a Korean audience instead of the original spelling — "아도" for "Ado",
@@ -63,6 +65,7 @@ class LrclibClient {
       HangulRomanizer.romanize(trackName),
       HangulRomanizer.romanize(artistName),
       durationSeconds,
+      featuredArtist,
     );
   }
 
@@ -70,6 +73,7 @@ class LrclibClient {
     String trackName,
     String artistName,
     int? durationSeconds,
+    String? featuredArtist,
   ) async {
     // /get and /search don't depend on each other at all, so both fire up front instead of
     // waiting for /get to miss first — LRCLIB's own response time (several seconds per
@@ -79,7 +83,8 @@ class LrclibClient {
     final exactFuture = _getExactWithAlias(trackName, artistName, durationSeconds);
 
     final candidates = _titleCandidates(trackName, artistName);
-    final searchFuture = _searchExact(candidates, trackName, artistName, durationSeconds);
+    final searchFuture =
+        _searchExact(candidates, trackName, artistName, durationSeconds, featuredArtist);
 
     // Both requests started above and are already in flight — but only /get is *awaited*
     // here. When it comes back with a synced hit, that's the best possible answer and there's
@@ -208,7 +213,7 @@ class LrclibClient {
     ['호시노 겐', 'Hoshino Gen', 'Gen Hoshino', '星野源', '星野 源'],
     ['후지이 카제', 'Fujii Kaze', '藤井風', '藤井 風'],
     ['유리', '유우리', 'Yuuri', 'Yuri', '優里', 'ゆうり'],
-    ['아키야마 키이로', 'Akiyama Kiiro', '秋山黄色'],
+    ['아키야마 키이로', 'Akiyama Kiiro', 'Kiro Akiyama', '秋山黄色', 'あきやまきいろ'],
     ['스다 마사키', 'Suda Masaki', 'Masaki Suda', '菅田将暉', 'すだまさき'],
     ['오카자키 타이이쿠', 'Okazaki Taiiku', '岡崎体育'],
     ['사키야마 소시', 'Sakiyama Soshi', '崎山蒼志'],
@@ -368,6 +373,311 @@ class LrclibClient {
     // 기타 한국 활동 이력이 있는 일본식 이름 버튜버
     ['아키라 레이', 'Akira Ray', '明楽レイ', 'あきらレイ'],
     ['아리스 마나', 'Alice Mana', 'アリス・マナ'],
+
+    // 유명 가수 및 밴드 (singers & bands) - 추가 3 (시티팝, 클래식, 록 밴드 등)
+    ['이키모노가카리', 'Ikimonogakari', 'いきものがかり'],
+    ['사카낙션', 'Sakanaction', 'サカナクション'],
+    ['타케우치 마리야', 'Mariya Takeuchi', '竹内まりや', 'たけうちまりや'],
+    ['마츠바라 미키', 'Miki Matsubara', '松原みき', 'まつばらみき'],
+    ['미시아', 'MISIA', 'ミーシャ'],
+    ['에이토', 'Eito', '瑛人', 'えいと'],
+    ['우루', 'Uru', 'ウル'],
+    ['다이스', 'Da-iCE', 'ダイス'],
+    ['베이비메탈', 'BABYMETAL', 'ベビーメタル'],
+    ['호테이 토모야스', 'Tomoyasu Hotei', '布袋寅泰', 'ほていともやす'],
+    ['글레이', 'GLAY', 'グレイ'],
+    ['루나 씨', 'LUNA SEA', 'ルナシー'],
+    ['샤란Q', 'Sharam Q', 'シャ乱Q', 'シャらんキュー'],
+
+    // 우타이테 및 유명 보컬로이드 프로듀서 (utaite & Vocaloid producers) - 추가 3
+    ['초가쿠세이 (초학생)', 'Chogakusei', '超学生', 'ちょうがくせい'],
+    ['나루세', 'nqrse', 'なるせ'],
+    ['리이누', 'Rinu', '莉犬', 'りいぬ'],
+    ['루스', 'luz', 'ルス'],
+    ['리브', 'Rib', 'りぶ'],
+    ['메가테라 제로', 'Megaterra Zero', 'メガテラ・ゼロ'],
+    ['게로', 'Gero', 'ゲロ'],
+    ['진 (자연의 적P)', 'Jin', 'じん'],
+    ['화악기밴드', 'Wagakki Band', '和楽器バンド', 'わがっきバンド'],
+    ['하루마키고한', 'Harumaki Gohan', 'はるまきごはん'],
+    ['츠미키', 'Tsumiki', 'ツミキ'],
+
+    // 버튜버 (VTubers) - 추가 3 (홀로라이브, 니지산지, 개인세 등)
+    ['토키노 소라', 'Tokino Sora', 'ときのそら'],
+    ['무라사키 시온', 'Murasaki Shion', '紫咲シオン', 'むらさきシオン'],
+    ['아마네 카나타', 'Amane Kanata', '天音かなた', 'あまねかなた'],
+    ['오마루 폴카', 'Omaru Polka', '尾丸ポルカ', 'おまるポルカ'],
+    ['하쿠이 코요리', 'Hakui Koyori', '博衣こより', 'はくいこより'],
+    ['사사키 사쿠', 'Sasaki Saku', '笹木咲', 'ささきさく'],
+    ['혼마 히마와리', 'Honma Himawari', '本間ひまわり', 'ほんまひまわり'],
+    ['앙쥬 카트리나', 'Ange Katrina', 'アンジュ・カトリーナ'],
+    ['리제 헬에스타', 'Lize Helesta', 'リゼ・ヘルエスタ'],
+    ['스오우 파트라', 'Suou Patra', '周防パトラ', 'すおうパトラ'],
+    ['케이손', 'kson', 'ケイソン'],
+
+    // 보컬로이드 및 음성 합성 소프트웨어 캐릭터 (Vocaloids & SynthV) - 추가 3
+    ['시유', 'SeeU', 'シユ'],
+    ['오네', 'ONE', 'オネ'],
+    ['릴리', 'Lily', 'リリィ'],
+    ['SF-A2 미키', 'SF-A2 miki', '開発コード miki', 'みき'],
+    ['우타타네 피코', 'Utatane Piko', '歌手音ピコ', 'うたたねピコ'],
+    ['하야부사', 'Hayabusa', 'ハヤブサ'],
+    ['갸라코', 'galaco', 'ギャラ子', 'ギャラこ'],
+    ['메이카 히메', 'Meika Hime', '鳴花ヒメ', 'めいかヒメ'],
+    ['메이카 미코토', 'Meika Mikoto', '鳴花ミコト', 'めいかミコト'],
+
+    // 최근 메가 히트곡을 낸 가수 및 밴드 (2020년대 중심)
+    ['크리피 넛츠', 'Creepy Nuts', 'クリーピーナッツ'],
+    ['오모이노타케', 'Omoinotake', 'オモイノタケ'],
+    ['타니 유우키', 'Tani Yuuki', 'タニユウキ'],
+    ['아타라시이 각코! (새로운 학교의 리더즈)', 'Atarashii Gakko!', '新しい学校のリーダーズ', 'あたらしいがっこうのリーダーズ'],
+    ['스미카', 'sumika', 'スミカ'],
+    ['다오코', 'Daoko', 'ダオコ'],
+
+    // 2000년대~2010년대 제이팝 전성기 히트 가수 및 밴드
+    ['하마사키 아유미', 'Ayumi Hamasaki', '浜崎あゆみ', 'はまさきあゆみ'],
+    ['유이', 'YUI', 'ユイ'],
+    ['니시노 카나', 'Kana Nishino', '西野カナ', 'にしのカナ'],
+    ['아이코', 'aiko', 'アイコ'],
+    ['슈퍼플라이', 'Superfly', 'スーパーフライ'],
+    ['유즈', 'Yuzu', 'ゆず'],
+    ['오오츠카 아이', 'Ai Otsuka', '大塚愛', 'おおつかあい'],
+    ['쿠라키 마이', 'Mai Kuraki', '倉木麻衣', 'くらきまい'],
+    ['코부쿠로', 'Kobukuro', 'コブクロ'],
+    ['케츠메이시', 'Ketsumeishi', 'ケツメイシ'],
+
+    // 록 밴드 (애니메이션 타이업 등으로 유명한 히트 밴드)
+    ['아시안 쿵후 제너레이션', 'ASIAN KUNG-FU GENERATION', 'アジアン・カンフー・ジェネレーション'],
+    ['카나분', 'KANA-BOON', 'カナブーン'],
+    ['맨 위드 어 미션', 'MAN WITH A MISSION', 'マン・ウィズ・ア・ミッション'],
+    ['알렉산드로스', '[Alexandros]', 'アレキサンドロス'],
+    ['몽골800', 'MONGOL800', 'モンゴルはっぴゃく'],
+
+    // 레전드 급 국민 가수 및 그룹 (90년대 포함)
+    ['스맙', 'SMAP', 'スマップ'],
+    ['드림스 컴 트루', 'DREAMS COME TRUE', 'ドリームズ・カム・トゥルー'],
+    ['에브리 리틀 씽', 'Every Little Thing', 'エヴリ・リトル・シング'],
+    ['티엠 레볼루션', 'T.M.Revolution', 'ティーエムレボリューション'],
+    ['야마시타 타츠로', 'Tatsuro Yamashita', '山下達郎', 'やましたたつろう'],
+    ['마츠토야 유미', 'Yumi Matsutoya', '松任谷由実', 'まつとうやゆみ'],
+
+    // 아이돌 그룹 (idol groups — 국민적 인기를 끈 그룹)
+    ['에이케이비48', 'AKB48', 'エーケービーフォーティーエイト'],
+    ['노기자카46', 'Nogizaka46', '乃木坂46', 'のぎざかフォーティーシックス'],
+    ['모닝구 무스메', 'Morning Musume', 'モーニング娘。', 'モーニングむすめ'],
+    ['스노우 맨', 'Snow Man', 'スノーマン'],
+    ['킨키 키즈', 'KinKi Kids', 'キンキキッズ'],
+    ['니쥬', 'NiziU', 'ニジュー'],
+
+    // 댄스 & 보컬 그룹 (dance & vocal groups)
+    ['에그자일', 'EXILE', 'エグザイル'],
+    ['산다이메 제이 소울 브라더스', 'Sandaime J SOUL BROTHERS', '三代目 J SOUL BROTHERS', 'さんだいめジェイ・ソウル・ブラザーズ'],
+    ['비퍼스트', 'BE:FIRST', 'ビーファースト'],
+    ['미우라 다이치', 'Daichi Miura', '三浦大知', 'みうらだいち'],
+
+    // 솔로 가수 (여성/남성 팝 히트 가수)
+    ['캬리 파뮤파뮤', 'Kyary Pamyu Pamyu', 'きゃりーぱみゅぱみゅ'],
+    ['코다 쿠미', 'Kumi Koda', '倖田來未', 'こうだくみ'],
+    ['쥬쥬', 'JUJU', 'ジュジュ'],
+    ['아오이 에이르', 'Eir Aoi', '藍井エイル', 'あおいエイル'],
+    ['레오나', 'ReoNa', 'レオナ'],
+
+    // 록 밴드 & 애니메이션 타이업 (rock bands & anime tie-ups)
+    ['스파이에어', 'SPYAIR', 'スパイエアー'],
+    ['유니즌 스퀘어 가든', 'UNISON SQUARE GARDEN', 'ユニゾンスクエアガーデン'],
+    ['플로우', 'FLOW', 'フロウ'],
+    ['아쿠아 타임즈', 'Aqua Timez', 'アクアタイムズ'],
+    ['스캔달', 'SCANDAL', 'スキャンダル'],
+    ['시샤모', 'SHISHAMO', 'シシャモ'],
+    ['폴카닷 스팅레이', 'Polkadot Stingray', 'ポルカドットスティングレイ'],
+
+    // 쇼와~헤이세이 시대 전설적인 가수 (80년대~90년대 레전드)
+    ['마츠다 세이코', 'Seiko Matsuda', '松田聖子', 'まつだせいこ'],
+    ['나카모리 아키나', 'Akina Nakamori', '中森明菜', 'なかもりあきな'],
+    ['오자키 유타카', 'Yutaka Ozaki', '尾崎豊', 'おざきゆたか'],
+    ['차게 앤 아스카', 'CHAGE and ASKA', 'チャゲ・アンド・アスカ'],
+    ['안전지대', 'Anzen Chitai', '安全地帯', 'あんぜんちたい'],
+    ['타마키 코지', 'Koji Tamaki', '玉置浩二', 'たまきこうじ'],
+
+    // 최근 틱톡, 릴스 등 숏폼 플랫폼 및 스트리밍 메가 히트 가수
+    ['아노', 'ano', 'あの'],
+    ['아스미', 'asmi', 'アスミ'],
+    ['메종데', 'MAISONdes', 'メゾン・デ'],
+    ['워츠', 'WurtS', 'ワーツ'],
+    ['콘톤 캔디', 'Conton Candy', 'コントンキャンディ'],
+    ['유카', 'YUKA', '有華', 'ゆか'],
+    ['토모오', 'TOMOO', 'トモオ'],
+    ['리리아.', 'Riria.', 'りりあ。'],
+    ['아유무 이마즈', 'Ayumu Imazu', '今津渉', 'いまづあゆむ'],
+    ['히라이 다이', 'Dai Hirai', '平井大', 'ひらいだい'],
+
+    // 최근 글로벌 히트 및 대형 팬덤을 가진 보이그룹
+    ['넘버 아이', 'Number_i', 'ナンバーアイ'],
+    ['스톤즈', 'SixTONES', 'ストーンズ'],
+    ['제이오원', 'JO1', 'ジェイオーワン'],
+    ['아이엔아이', 'INI', 'アイエヌアイ'],
+
+    // 최근 애니메이션 타이업 및 차트 역주행 히트 밴드/가수
+    ['텐피트', '10-FEET', 'テンフィート'],
+    ['심', 'SiM', 'シム'],
+    ['피플 원', 'PEOPLE 1', 'ピープルワン'],
+    ['투보에', 'TOOBOE', 'トオボエ'],
+    ['와치', 'wacci', 'ワッチ'],
+    ['오썸 시티 클럽', 'Awesome City Club', 'オーサムシティクラブ'],
+    ['크로이', 'Kroi', 'クロイ'],
+    ['칠리 빈즈', 'Chilli Beans.', 'チリビーンズ'],
+    ['널바리치', 'Nulbarich', 'ナルバリッチ'],
+
+    // 최근 힙합/R&B 트렌드 리더
+    ['에이위치', 'Awich', 'エイウィッチ'],
+    ['시럽', 'SIRUP', 'シラップ'],
+
+    // 보컬로이드 프로듀서 출신이나 틱톡 히트로 대중가수 반열에 오른 아티스트
+    ['치노조', 'Chinozo', 'ちのぞー'],
+
+    // 글로벌 애니메이션 타이업 및 하드 록/밴드 트렌드 리더
+    ['여왕벌', 'Ziyoou-vachi / Queen Bee', '女王蜂', 'じょおうばち'],
+    ['TK from 린토시테시구레', 'TK from Ling tosite sigure', 'TK from 凛として時雨', 'ティーケー・フロム・りんとしてしぐれ'],
+    ['밀레니엄 퍼레이드', 'millennium parade', 'ミレニアムパレード'],
+    ['버나웃 신드롬즈', 'BURNOUT SYNDROMES', 'バーンアウト・シンドロームズ'],
+    ['콜드레인', 'coldrain', 'コールドレイン'],
+    ['에고이스트', 'EGOIST', 'エゴイスト'],
+    ['슈퍼셀', 'supercell', 'スーパーセル'],
+    ['가르니델리아', 'GARNiDELiA', 'ガルニデリア'],
+    ['하타 모토히로', 'Motohiro Hata', '秦基博', 'はたもとひろ'],
+    ['오이시 마사요시', 'Masayoshi Oishi', '大石昌良', 'おおいしまさよし'],
+    ['미즈키 나나', 'Nana Mizuki', '水樹奈々', 'みずきなな'],
+    ['클라리스', 'ClariS', 'クラリス'],
+    ['스키마스위치', 'Sukima Switch', 'スキマスイッチ'],
+
+    // 인터넷/틱톡 발 팝 아티스트 및 프로듀서
+    ['츠유', 'TUYU', 'ツユ'],
+    ['와누카', 'Wanuka', '和ぬか', 'わぬか'],
+    ['스다 케이나', 'Keina Suda', '須田景凪', 'すだけいな'], // 벌룬(Balloon)의 싱어송라이터 활동명
+    ['허니웍스', 'HoneyWorks', 'ハニーワークス'],
+    ['3월의 판타시아', 'Sangatsu no Phantasia', '三月のパンタシア', 'さんがつのパンタシア'],
+    ['P마루사마', 'P Maru-sama', 'P丸様。', 'ピーまるさま'],
+    ['소우', 'Sou', 'ソウ'],
+
+    // 레전드 및 최신 보컬로이드 프로듀서
+    ['오와카', 'wowaka', 'ヲワカ'],
+    ['칸자키 이오리', 'Kanzaki Iori', 'カンザキイオリ'],
+    ['쿠로우사 P', 'Kurousa P', '黒うさP', 'くろうさピー'],
+    ['하치오지 P', 'Hachioji P', '八王子P', 'はちおうじピー'],
+    ['스리이', 'surii', 'すりぃ'],
+    ['아야세', 'Ayase', 'アヤセ'], // YOASOBI의 프로듀서 본인 명의
+
+    // 버추얼 아티스트 및 추가 버튜버 (홀로라이브, 카미츠바키 스튜디오, 1세대 등)
+    ['키즈나 아이', 'Kizuna AI', 'キズナアイ'],
+    ['리메', 'RIM', '理芽', 'りめ'],
+    ['사카마타 클로에', 'Sakamata Chloe', '沙花叉クロヱ', 'さかまたクロヱ'],
+    ['오오카미 미오', 'Ookami Mio', '大神ミオ', 'おおかみミオ'],
+    ['모모스즈 네네', 'Momosuzu Nene', '桃鈴ねね', 'ももすずねね'],
+    ['시로가네 노엘', 'Shirogane Noel', '白銀ノエル', 'しろがねノエル'],
+    ['시라누이 후레아', 'Shiranui Flare', '不知火フレア', 'しらぬいフレア'],
+    ['카구야 루나', 'Kaguya Luna', '輝夜月', 'かぐやるな'],
+
+    // 인디/얼터너티브, 록, 애니메이션 타이업 밴드 및 가수
+    ['게스노키와미오토메', 'Gesu no Kiwami Otome', 'ゲスの極み乙女', 'ゲスのきわみおとめ'],
+    ['인디고 라 엔드', 'indigo la End', 'インディゴ ラ エンド'],
+    ['맥시멈 더 호르몬', 'MAXIMUM THE HORMONE', 'マキシマム ザ ホルモン'],
+    ['비쉬', 'BiSH', 'ビッシュ'],
+    ['플룸풀', 'flumpool', 'フランプール'],
+    ['미야노 마모루', 'Mamoru Miyano', '宮野真守', 'みやのまもる'],
+    ['스피라 스피카', 'Spira Spica', 'スピラ・スピカ'],
+    ['아카세 아카리', 'Akari Akase', 'あかせあかり'],
+    ['안리', 'Anri', '杏里', 'あんり'],
+    ['오메가 트라이브', 'Omega Tribe', 'オメガトライブ'],
+    ['키린지', 'KIRINJI', 'キリンジ'],
+    ['챤미나', 'CHANMINA', 'ちゃんみな'],
+    ['엑스지', 'XG', 'エックスジー'],
+    ['야바이 티셔츠 야상', 'Yabai T-Shirt Yasan', 'ヤバイTシャツ屋さん', 'ヤバイティーシャツやさん'],
+
+    // 우타이테 및 유명 보컬로이드 프로듀서 - 추가 4
+    ['미키토P', 'MikitoP', 'みきとP', 'みきとピー'],
+    ['카이리키 베어', 'Kairiki bear', 'かいりきベア'],
+    ['니루카지츠', 'Nilfruits', '煮ル果実', 'にルかじつ'],
+    ['쿠라게P', 'KurageP', 'くらげP', 'くらげピー'],
+    ['코스모@폭주P', 'cosMo@BousouP', 'cosMo@暴走P', 'コスモ アット ぼうそうピー'],
+    ['구치리', 'Guchiry', 'ぐちり'],
+    ['유요유페', 'Yuyoyuppe', 'ゆよゆっぺ'],
+    ['토마', 'Tohma', 'トーマ'],
+    ['피콘', 'Picon', 'ピコン'],
+    ['카노', 'Kano', '鹿乃', 'かの'],
+    ['구루타밍', 'Glutamine', 'ぐるたみん'],
+    ['아라키', 'Araki', 'あらき'],
+
+    // 버튜버 (홀로라이브, 니지산지 소속 및 개인세) - 추가 4
+    ['히메모리 루나', 'Himemori Luna', '姫森ルーナ', 'ひめもりルーナ'],
+    ['카자마 이로하', 'Kazama Iroha', '風真いろは', 'かざまいろは'],
+    ['아키 로젠탈', 'Aki Rosenthal', 'アキ・ローゼンタール'],
+    ['로보코 씨', 'Robocosan', 'ロボ子さん', 'ロボこさん'],
+    ['왓슨 아멜리아', 'Watson Amelia', 'ワトソン・アメリア'],
+    ["니노마에 이나니스", "Ninomae Ina'nis", '一伊那尓栖', 'にのまえいなにす'],
+    ['타카나시 키아라', 'Takanashi Kiara', '小鳥遊キアラ', 'たかなしキアラ'],
+    ['나나시 무메이', 'Nanashi Mumei', '七詩ムメイ', 'ななしムメイ'],
+    ['오로 크로니', 'Ouro Kronii', 'オーロ・クロニー'],
+    ['코보 카나에루', 'Kobo Kanaeru', 'こぼ・かなえる'],
+    ['복스 아쿠마', 'Vox Akuma', 'ヴォックス・アクマ'],
+    ['미스타 리아스', 'Mysta Rias', 'ミスタ・リアス'],
+    ['아이바 우이하', 'Aiba Uiha', '相羽ういは', 'あいばういは'],
+    ['시구레 우이', 'Ui Shigure', 'しぐれうい'],
+
+    // 보컬로이드 및 음성 합성 캐릭터 (Vocaloids & SynthV) - 추가 4
+    ['키즈나 아카리', 'Kizuna Akari', '紲星あかり', 'きずなあかり'],
+    ['치카', 'Chika', 'チカ'],
+    ['라나', 'Rana', 'ラナ'],
+    ['코코네', 'Kokone', '心華', 'ここね'],
+    ['사토 사사라', 'Sato Sasara', 'さとうささら'],
+    ['스즈키 츠두미', 'Suzuki Tsudumi', 'すずきつづみ'],
+    ['엘리노어 포르테', 'Eleanor Forte', 'エレノア・フォルテ'],
+    ['루이', 'Lui', 'ルイ'],
+    ['링', 'Ring', 'リング'],
+
+    // 최근 숏폼/스트리밍 메가 히트 가수
+    ['에일', 'eill', 'エイル'],
+    ['콧치노 켄토', 'Kocchi no Kento', 'こっちのけんと'],
+    ['츠키', 'tuki.', 'ツキ'],
+    ['타카얀', 'Takayan', 'たかやん'],
+    ['모사오', 'Mosawo.', 'もさを。'],
+    ['초큐메이', 'ChoQMay', 'チョーキューメイ'],
+    ['코하나 람', 'Kohana Lam', 'こはならむ'],
+    ['린네', 'Rin音', 'りんね'],
+
+    // eill과 비슷한 바이브의 R&B, 소울, 힙합, 트렌디 팝 아티스트
+    ['이리', 'iri', 'イリ'],
+    ['무카이 타이치', 'Taichi Mukai', '向井太一', 'むかいたいち'],
+    ['첼미코', 'chelmico', 'チェルミコ'],
+    ['스터츠', 'STUTS', 'スタッツ'],
+    ['펀피', 'PUNPEE', 'パンピー'],
+    ['오부쿠로 나리아키', 'Nariaki Obukuro', '小袋成彬', 'おぶくろなりあき'],
+    ['스카이하이', 'SKY-HI', 'スカイハイ'],
+    ['치바 유키 (코)', 'Yuki Chiba (KOHH)', '千葉雄喜', 'ちばゆうき'],
+    ['신 사키우라', 'Shin Sakiura', 'シン・サキウラ'],
+
+    // 떠오르는 싱어송라이터 및 록/인디 팝
+    ['비케블랑카', 'Vickeblanka', 'ビッケブランカ'],
+    ['코레사와', 'Koresawa', 'コレサワ'],
+    ['미유나', 'Miyuna', 'みゆな'],
+    ['안리 (Anly)', 'Anly', 'アンリ'],
+    ['시유이', 'Shiyui', 'シユイ'],
+    ['렌', 'ReN', 'レン'],
+    ['카미와 사이코로오 후라나이 (신은 주사위를 던지지 않는다)', 'Kami wa Saikoro wo Furanai', '神はサイコロを振らない', 'かみはサイコロをふらない'],
+    ['칸카쿠 피에로', 'Kankaku Piero', '感覚ピエロ', 'かんかくピエロ'],
+    ['사죠노하나', 'sajou no hana', 'サジョウノハナ'],
+
+    // 인터넷 일렉트로닉 팝 및 트랙메이커 (서브컬처 친화적)
+    ['테디로이드', 'TeddyLoid', 'テディロイド'],
+    ['유노미', 'Yunomi', 'ユノミ'],
+    ['네코 해커', 'Neko Hacker', 'ネコハッカー'],
+    ['코토노하우스', 'KOTONOHOUSE', 'コトノハウス'],
+
+    // 버튜버 (인기 스트리머 및 브이스포/네오포르테 계열)
+    ['시부야 할', 'Shibuya HAL', '渋谷ハル', 'しぶやハル'],
+    ['시라유키 레이드', 'Shirayuki Reid', '白雪レイド', 'しらゆきレイド'],
+    ['쿠루미 노아', 'Kurumi Noah', '胡桃のあ', 'くるみのあ'],
+    ['이치노세 우루하', 'Ichinose Uruha', '一ノ瀬うるは', 'いちのせうるは'],
+    ['시시가미 레오나', 'Shishigami Leona', '獅子神レオナ', 'ししがみレオナ'],
   ];
 
   // True when `queryArtist` and `entryArtist` (both already lowercased/trimmed) are the same
@@ -406,6 +716,7 @@ class LrclibClient {
     String trackName,
     String artistName,
     int? durationSeconds,
+    String? featuredArtist,
   ) async {
     final normalizedCandidates = titleCandidates.map((c) => c.trim().toLowerCase()).toSet();
     final normalizedArtist = artistName.trim().toLowerCase();
@@ -429,29 +740,43 @@ class LrclibClient {
         final entryTitle = ((entry['trackName'] as String?) ?? '').trim().toLowerCase();
         final entryArtist = ((entry['artistName'] as String?) ?? '').trim().toLowerCase();
         if (!normalizedCandidates.contains(entryTitle)) continue;
-        if (normalizedArtist.isNotEmpty && !_artistMatches(normalizedArtist, entryArtist)) continue;
+        if (normalizedArtist.isNotEmpty &&
+            !_artistOk(normalizedArtist, entryArtist, featuredArtist)) {
+          continue;
+        }
         if (_isRomanizedMismatch(entry, trackName, artistName)) continue;
         if (_isContaminatedSubmission(entry)) continue;
-        best = _preferred(best, entry, durationSeconds);
+        best = _preferred(best, entry, durationSeconds, featuredArtist);
       }
     }
     return best == null ? null : _parse(best);
   }
 
   // Among multiple exact title/artist matches (different contributors' submissions of the
-  // same recording), prefers a synced one over a plain one, and — between two that are both
-  // synced or both plain — whichever duration is closer to the one actually playing, so a
-  // studio cut doesn't get mixed up with a live/extended version sharing the same title and
-  // artist.
+  // same recording), prefers a synced one over a plain one; then, if a "(feat. X)" clause was
+  // in the query, one whose own trackName/artistName actually credits that guest over one that
+  // doesn't (LRCLIB submissions are inconsistent about this — some credit only the primary
+  // artist even for the same recording — so a submission that *does* name the featured artist
+  // is more confidently the exact right recording, not just a same-title/artist match); and
+  // finally, among ties, whichever duration is closer to the one actually playing, so a studio
+  // cut doesn't get mixed up with a live/extended version sharing the same title and artist.
   Map<String, dynamic> _preferred(
     Map<String, dynamic>? current,
     Map<String, dynamic> candidate,
     int? durationSeconds,
+    String? featuredArtist,
   ) {
     if (current == null) return candidate;
     final currentSynced = (current['syncedLyrics'] as String?)?.trim().isNotEmpty ?? false;
     final candidateSynced = (candidate['syncedLyrics'] as String?)?.trim().isNotEmpty ?? false;
     if (candidateSynced != currentSynced) return candidateSynced ? candidate : current;
+    if (featuredArtist != null && featuredArtist.isNotEmpty) {
+      final currentHasFeature = _mentionsArtist(current, featuredArtist);
+      final candidateHasFeature = _mentionsArtist(candidate, featuredArtist);
+      if (candidateHasFeature != currentHasFeature) {
+        return candidateHasFeature ? candidate : current;
+      }
+    }
     if (durationSeconds == null) return current;
     return _durationDiff(candidate, durationSeconds) < _durationDiff(current, durationSeconds)
         ? candidate
@@ -538,6 +863,36 @@ class LrclibClient {
     return _creditNoteMarkers.any(lyrics.contains);
   }
 
+  // Whether `name` shows up in this result's own trackName or artistName — used both to widen
+  // artist acceptance (_artistOk below) and as a preference signal (_preferred above) for a
+  // "(feat. X)" query, never as an outright rejection: LRCLIB submissions are inconsistent
+  // about whether a featured artist is credited at all (plenty of correct, single-artist-only
+  // submissions exist for a song that does have a real feature — see Camila Cabello's
+  // "Havana"), so demanding it be present would reject perfectly good matches just as often as
+  // it would catch a genuinely wrong one.
+  bool _mentionsArtist(Map<String, dynamic> result, String name) {
+    final needle = name.trim().toLowerCase();
+    if (needle.isEmpty) return false;
+    final title = ((result['trackName'] as String?) ?? '').toLowerCase();
+    final artist = ((result['artistName'] as String?) ?? '').toLowerCase();
+    return title.contains(needle) || artist.contains(needle);
+  }
+
+  // The exact-match artist check above rejects "Camila Cabello feat. Young Thug" outright for
+  // a query artist of plain "Camila Cabello" — not the same string at all, even though it's
+  // the same artist, just with a collaborator's credit folded into the same field the way some
+  // contributors submit it. Stripping that clause the same way TitleNormalizer.primaryArtist()
+  // already does for the *query* side and comparing what's left recognizes these as a match
+  // too, but only when the featured name we're actually looking for is the one credited —
+  // otherwise a random other collab ("... feat. Someone Else") would wrongly pass as well.
+  bool _artistOk(String normalizedArtist, String entryArtist, String? featuredArtist) {
+    if (_artistMatches(normalizedArtist, entryArtist)) return true;
+    if (featuredArtist == null || featuredArtist.isEmpty) return false;
+    final entryPrimary = TitleNormalizer.primaryArtist(entryArtist).trim().toLowerCase();
+    if (!_artistMatches(normalizedArtist, entryPrimary)) return false;
+    return entryArtist.contains(featuredArtist.trim().toLowerCase());
+  }
+
   // /get matches the artist string server-side (unlike /search, whose results this class
   // filters itself with _artistMatches), so a known alias only helps here if it's actually
   // sent as its own request — checking the *response* against the alias table would be too
@@ -548,7 +903,9 @@ class LrclibClient {
     int? durationSeconds,
   ) async {
     final aliases = _artistAliasesFor(artistName);
-    if (aliases.isEmpty) return _getExact(trackName, artistName, durationSeconds);
+    if (aliases.isEmpty) {
+      return _getExact(trackName, artistName, durationSeconds);
+    }
     final results = await Future.wait([
       _getExact(trackName, artistName, durationSeconds),
       for (final alias in aliases) _getExact(trackName, alias, durationSeconds),
@@ -562,6 +919,12 @@ class LrclibClient {
     return results.firstWhere((r) => r != null, orElse: () => null);
   }
 
+  // No featuredArtist check here — /get is matched server-side against whatever artistName we
+  // actually send, which is always the plain primary artist (never the feat-augmented string),
+  // so its response is never going to be one of the "feat. X credited in the artist field"
+  // submissions _artistOk()/_preferred() above specifically watch for. Rejecting a plain-
+  // artist /get hit just for not mentioning a feature it was never going to mention would only
+  // throw away a perfectly good match.
   Future<LrclibLyrics?> _getExact(String trackName, String artistName, int? durationSeconds) async {
     try {
       final response = await _dio.get<Map<String, dynamic>>('/get', queryParameters: {
