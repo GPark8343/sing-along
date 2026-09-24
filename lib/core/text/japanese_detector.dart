@@ -10,6 +10,15 @@ class JapaneseDetector {
 
   static bool isJapanese(String text) => _kana.hasMatch(text);
 
+  // CJK Unified Ideographs (+ Extension A) — covers ordinary kanji usage in lyrics. On its own
+  // this can't tell Japanese kanji apart from Chinese hanzi (see the class doc comment), so
+  // callers should only use this to catch a kanji-only *line* (no kana of its own to match
+  // [isJapanese]) once the surrounding song is already established as Japanese by some other
+  // line that does have kana — see LyricsRepository._buildResult's second classification pass.
+  static final RegExp _kanji = RegExp(r'[一-鿿㐀-䶿]');
+
+  static bool hasKanji(String text) => _kanji.hasMatch(text);
+
   static final RegExp _wordPattern = RegExp(r"[A-Za-z']+");
 
   // Accented Latin letters that never appear in Hepburn-style romaji (which is plain ASCII

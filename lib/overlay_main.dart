@@ -27,7 +27,8 @@ class _LyricLine {
   final String original;
   final String?
   phonetic; // Japanese songs only — computed on-device, no key needed
-  final String? translation; // Japanese/English lines only, via on-device ML Kit
+  final String?
+  translation; // Japanese/English lines only, via on-device ML Kit
 
   const _LyricLine({
     required this.timestampMs,
@@ -66,6 +67,9 @@ class _OverlayRootState extends State<OverlayRoot> {
   static const double _phoneticFontRatio = 0.093;
   static const double _translationFontRatio = 0.087;
   static const double _placeholderFontRatio = 0.082;
+  // The collapsed bar's fixed height in dp — passed straight to resizeOverlay(), which (unlike
+  // showOverlay()) does its own dp->px conversion, so no devicePixelRatio math is needed here.
+  static const double _collapsedBarHeightDp = 44;
 
   StreamSubscription<dynamic>? _messageSubscription;
   List<_LyricLine> _lines = const [];
@@ -90,6 +94,16 @@ class _OverlayRootState extends State<OverlayRoot> {
   // track change rather than persisting, since a drift correction for one song's timing has no
   // reason to carry over to a completely different one.
   int _syncOffsetMs = 0;
+  // Whether the card is shrunk down to the thin bar (see _buildCollapsedBar) — a manual toggle,
+  // not tied to song state, so it stays collapsed/expanded across track changes until the user
+  // taps it again.
+  bool _collapsed = false;
+  // Captured from this window's own MediaQuery on every non-collapsed build (see build()) —
+  // this is the same dp value main.dart derived from windowHeightScreenRatio when it originally
+  // called showOverlay(), so re-expanding restores exactly the height the card started at
+  // (including across a screen rotation, since it's refreshed each time we're not collapsed)
+  // rather than a hardcoded guess.
+  double? _expandedHeightDp;
 
   @override
   void initState() {
@@ -248,6 +262,28 @@ class _OverlayRootState extends State<OverlayRoot> {
     FlutterOverlayWindow.shareData({'type': 'expand'});
   }
 
+  // Shrinks/restores the native overlay window itself (not the full-screen app page — that's
+  // _requestExpand above, an unrelated concept). FlutterOverlayWindow's own channel is safe to
+  // call directly from this engine (unlike a custom plugin — see main.dart's part-of note),
+  // since the plugin that owns the overlay window is naturally present on both sides of it.
+  Future<void> _setCollapsed(bool collapsed) async {
+    if (_collapsed == collapsed) return;
+    final targetHeightDp = collapsed
+        ? _collapsedBarHeightDp
+        : (_expandedHeightDp ?? _collapsedBarHeightDp);
+    setState(() => _collapsed = collapsed);
+    // width intentionally left as WindowSize.matchParent (-1) here — a fixed literal dp width
+    // and a position-reanchoring moveOverlay() call were both tried and made things worse (the
+    // card started disappearing on every single toggle, not just after a drag), so this stays
+    // on the simplest form that's actually known to work: only height changes, width and
+    // position are left exactly as showOverlay() set them up.
+    await FlutterOverlayWindow.resizeOverlay(
+      WindowSize.matchParent,
+      targetHeightDp.round(),
+      true,
+    );
+  }
+
   // Closing from the overlay's own X button is invisible to the main engine's _overlayActive
   // state otherwise — it only finds out on its own next _refreshStatus() call (app resume,
   // permission screen return, ...), so the home screen's toggle button would keep reading
@@ -260,6 +296,13 @@ class _OverlayRootState extends State<OverlayRoot> {
 
   @override
   Widget build(BuildContext context) {
+    // While expanded, this window's own MediaQuery reports its actual current dp height — the
+    // same value main.dart derived from windowHeightScreenRatio when it called showOverlay(),
+    // since that's exactly what's on screen right now. Refreshed every non-collapsed build
+    // (not just once) so a screen rotation while expanded updates what we'll restore to later.
+    if (!_collapsed) {
+      _expandedHeightDp = MediaQuery.of(context).size.height;
+    }
     // Anything that isn't actually synced — user-pasted text, a plain unsynced LRCLIB match,
     // or sync manually turned off from the full-screen page — has no reliable "current line"
     // to show here: this card has no room for manual left/right navigation UI, so it just
@@ -267,6 +310,9 @@ class _OverlayRootState extends State<OverlayRoot> {
     final currentLine = (_lines.isEmpty || !_isSynced)
         ? null
         : _lines[_currentIndex.clamp(0, _lines.length - 1)];
+    if (_collapsed) {
+      return _buildCollapsedBar();
+    }
     final progress =
         (_durationMs != null && _durationMs! > 0 && _positionMs != null)
         ? (_positionMs! / _durationMs!).clamp(0.0, 1.0)
@@ -308,102 +354,119 @@ class _OverlayRootState extends State<OverlayRoot> {
                           height: cardHeight * _topBarRatio,
                           child: Row(
                             children: [
-                              const SizedBox(width: 4),
-                              // Each badge carries its own symmetric horizontal padding now
-                              // (rather than a one-sided gap only before it) so the spacing
-                              // around it stays even regardless of which neighboring badges
-                              // happen to be showing.
-                              if (_fromCache && _lines.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                  ),
+                              // Everything left of the window-control icons is wrapped so it
+                              // shrinks to fit instead of sitting directly in the Row — the
+                              // cache badge, sync badge, and (when synced) three offset controls
+                              // can together overflow the available width on a narrower window/
+                              // device. A scrollable row was tried first, but that just pushed
+                              // the +0.5s button off the right edge with nothing indicating it
+                              // needed a swipe to reach — FittedBox instead scales the whole
+                              // group down together so every control stays visible (just
+                              // smaller when space is tight), matching how the lyrics area
+                              // below already handles the same problem.
+                              IconButton(
+                                iconSize: 22,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 44,
+                                  minHeight: 44,
+                                ),
+                                icon: const Icon(
+                                  Icons.expand_less,
+                                  color: Colors.white70,
+                                ),
+                                tooltip: '접기',
+                                onPressed: () => _setCollapsed(true),
+                              ),
+                              Expanded(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerLeft,
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      const Icon(
-                                        Icons.bookmark,
-                                        color: Colors.amberAccent,
-                                        size: 14,
-                                      ),
-                                      const SizedBox(width: 2),
-                                      const Text(
-                                        '저장됨',
-                                        style: TextStyle(
-                                          color: Colors.amberAccent,
-                                          fontSize: 11,
+                                      const SizedBox(width: 4),
+                                      // Each badge carries its own symmetric horizontal padding
+                                      // now (rather than a one-sided gap only before it) so the
+                                      // spacing around it stays even regardless of which
+                                      // neighboring badges happen to be showing.
+                                      // Icon-only badges — the text labels ("저장됨",
+                                      // "동기화"/"비동기화") were dropped to free up horizontal
+                                      // space in the top bar (the same space the offset
+                                      // controls need); the meaning is still reachable via each
+                                      // icon's own Tooltip on long-press.
+                                      if (_fromCache && _lines.isNotEmpty)
+                                        const Padding(
+                                          padding: EdgeInsets.only(
+                                            left: 4,
+                                            right: 8,
+                                          ),
+                                          child: Tooltip(
+                                            message: '저장된 가사',
+                                            child: Icon(
+                                              Icons.bookmark,
+                                              color: Colors.amberAccent,
+                                              size: 14,
+                                            ),
+                                          ),
                                         ),
-                                      ),
+                                      if (_lines.isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                          ),
+                                          child: Tooltip(
+                                            message: _isSynced
+                                                ? '싱크됨 — 자동으로 넘어감'
+                                                : '싱크 없음 — 눌러서 전체화면으로 보기',
+                                            child: Icon(
+                                              _isSynced
+                                                  ? Icons.sync
+                                                  : Icons.sync_disabled,
+                                              color: _isSynced
+                                                  ? Colors.lightGreenAccent
+                                                  : Colors.orangeAccent,
+                                              size: 14,
+                                            ),
+                                          ),
+                                        ),
+                                      // Only meaningful for a song that's actually auto-advancing —
+                                      // there's no "timing" to correct for unsynced/manual-navigation
+                                      // lyrics, so this stays hidden rather than sitting there doing
+                                      // nothing.
+                                      if (_isSynced) ...[
+                                        _SyncOffsetButton(
+                                          icon: Icons.remove,
+                                          tooltip: '가사를 조금 늦게 (-0.5초)',
+                                          onPressed: () =>
+                                              _adjustSyncOffset(-500),
+                                        ),
+                                        // Always shown, not just once it's nonzero — a fixed width
+                                        // keeps the +/- buttons from visually shifting left/right as
+                                        // the digit count changes between taps (e.g. "0.0s" vs
+                                        // "-1.5s" vs "+10.0s").
+                                        SizedBox(
+                                          width: 26,
+                                          child: Text(
+                                            '${_syncOffsetMs > 0 ? '+' : ''}${(_syncOffsetMs / 1000).toStringAsFixed(1)}s',
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 9,
+                                            ),
+                                          ),
+                                        ),
+                                        _SyncOffsetButton(
+                                          icon: Icons.add,
+                                          tooltip: '가사를 조금 빠르게 (+0.5초)',
+                                          onPressed: () =>
+                                              _adjustSyncOffset(500),
+                                        ),
+                                      ],
                                     ],
                                   ),
                                 ),
-                              if (_lines.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                  ),
-                                  child: Tooltip(
-                                    message: _isSynced
-                                        ? '싱크됨 — 자동으로 넘어감'
-                                        : '싱크 없음 — 눌러서 전체화면으로 보기',
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          _isSynced
-                                              ? Icons.sync
-                                              : Icons.sync_disabled,
-                                          color: _isSynced
-                                              ? Colors.lightGreenAccent
-                                              : Colors.orangeAccent,
-                                          size: 14,
-                                        ),
-                                        const SizedBox(width: 2),
-                                        Text(
-                                          _isSynced ? '동기화' : '비동기화',
-                                          style: TextStyle(
-                                            color: _isSynced
-                                                ? Colors.lightGreenAccent
-                                                : Colors.orangeAccent,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              // Only meaningful for a song that's actually auto-advancing —
-                              // there's no "timing" to correct for unsynced/manual-navigation
-                              // lyrics, so this stays hidden rather than sitting there doing
-                              // nothing.
-                              if (_isSynced) ...[
-                                _SyncOffsetButton(
-                                  icon: Icons.remove,
-                                  tooltip: '가사를 조금 늦게 (-0.5초)',
-                                  onPressed: () => _adjustSyncOffset(-500),
-                                ),
-                                // Always shown, not just once it's nonzero — a fixed width
-                                // keeps the +/- buttons from visually shifting left/right as
-                                // the digit count changes between taps (e.g. "0.0s" vs
-                                // "-1.5s" vs "+10.0s").
-                                SizedBox(
-                                  width: 26,
-                                  child: Text(
-                                    '${_syncOffsetMs > 0 ? '+' : ''}${(_syncOffsetMs / 1000).toStringAsFixed(1)}s',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 9,
-                                    ),
-                                  ),
-                                ),
-                                _SyncOffsetButton(
-                                  icon: Icons.add,
-                                  tooltip: '가사를 조금 빠르게 (+0.5초)',
-                                  onPressed: () => _adjustSyncOffset(500),
-                                ),
-                              ],
-                              const Spacer(),
+                              ),
                               IconButton(
                                 iconSize: 22,
                                 padding: EdgeInsets.zero,
@@ -611,6 +674,88 @@ class _OverlayRootState extends State<OverlayRoot> {
                     ),
                   );
                 },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // The thin pill shown when collapsed — full window width, fixed height, just enough to tap
+  // back open or read what's currently playing at a glance. Deliberately minimal: no sync/cache
+  // badges or offset controls, since those already have no room to spare on the full card.
+  Widget _buildCollapsedBar() {
+    final label = _loadingLyrics
+        ? '가사 불러오는 중...'
+        : ((_title == null || _title!.isEmpty)
+              ? 'sing-along'
+              : ((_artist == null || _artist!.isEmpty)
+                    ? _title!
+                    : '${_title!} - ${_artist!}'));
+    return Material(
+      color: Colors.transparent,
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: SizedBox(
+              width: double.infinity,
+              height: _collapsedBarHeightDp,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.82),
+                  borderRadius: BorderRadius.circular(
+                    _collapsedBarHeightDp / 2,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 6),
+                    IconButton(
+                      iconSize: 18,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
+                      icon: const Icon(
+                        Icons.expand_more,
+                        color: Colors.white70,
+                      ),
+                      tooltip: '펼치기',
+                      onPressed: () => _setCollapsed(false),
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _setCollapsed(false),
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      iconSize: 18,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      onPressed: _requestClose,
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                ),
               ),
             ),
           ),

@@ -276,6 +276,27 @@ class LyricsRepository {
         spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
       spanishIndices.addAll(maybeSpanishIndices);
     }
+    // A kanji-only line (a title/credit line, or just a verse with no kana of its own — kana
+    // isn't required every line, only somewhere in the song) has nothing for isJapanese()'s
+    // kana check to match, so on its own it would otherwise fall through to the German/English
+    // classifier below and get neither a 독음 reading nor a real translation. Only trusted once
+    // the song already has at least one *confirmed* (kana-bearing) Japanese line — hasKanji()
+    // alone can't distinguish Japanese kanji from Chinese hanzi, but "some other line in this
+    // same song is definitely Japanese" makes that ambiguity moot.
+    if (japaneseIndices.isNotEmpty) {
+      final alreadyClassified = {
+        ...japaneseIndices,
+        ...spanishIndices,
+        ...maybeSpanishIndices,
+      };
+      for (var i = 0; i < originalTexts.length; i++) {
+        if (alreadyClassified.contains(i)) continue;
+        if (JapaneseDetector.hasKanji(originalTexts[i])) {
+          japaneseIndices.add(i);
+        }
+      }
+      japaneseIndices.sort();
+    }
     Future<List<String>?> fetchJapaneseReadings() {
       if (japaneseIndices.isEmpty) return Future.value(null);
       return _phoneticClient.readingsForLines([
