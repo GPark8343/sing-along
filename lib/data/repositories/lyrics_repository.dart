@@ -5,11 +5,13 @@ import '../../core/text/lrc_parser.dart';
 import '../../core/text/spanish_detector.dart';
 import '../../core/text/spanish_hangul.dart';
 import '../../core/text/title_normalizer.dart';
+import '../api/deepl_client.dart';
 import '../api/lrclib_client.dart';
 import '../api/ml_kit_translation_client.dart';
 import '../hive/models/cached_lyric_line.dart';
 import '../hive/models/cached_lyrics_entry.dart';
 import '../native/japanese_reading_bridge.dart';
+import '../secure/translation_key_storage.dart';
 
 /// One lyric line with whichever tiers were actually available. [phonetic]
 /// is only ever set for Japanese songs (computed on-device, no key needed);
@@ -67,14 +69,17 @@ class LyricsRepository {
     LrclibClient? lrclibClient,
     JapaneseReadingClient? phoneticClient,
     MlKitTranslationClient? translationClient,
+    DeepLClient? deepLClient,
   }) : _lrclibClient = lrclibClient ?? LrclibClient(),
        _phoneticClient = phoneticClient ?? JapaneseReadingClient(),
-       _translationClient = translationClient ?? MlKitTranslationClient();
+       _translationClient = translationClient ?? MlKitTranslationClient(),
+       _deepLClient = deepLClient ?? DeepLClient();
 
   final Box<CachedLyricsEntry> _cacheBox;
   final LrclibClient _lrclibClient;
   final JapaneseReadingClient _phoneticClient;
   final MlKitTranslationClient _translationClient;
+  final DeepLClient _deepLClient;
 
   Future<LyricsResult> getLyrics({
     required String title,
@@ -271,21 +276,6 @@ class LyricsRepository {
         spanishIndices.length / confidentNonJapaneseCount >= 0.3) {
       spanishIndices.addAll(maybeSpanishIndices);
     }
-    // Everything left over — not Japanese, not (confidently or promoted) Spanish — is further
-    // split into German vs English by ML Kit's own language identifier (see
-    // MlKitTranslationClient.classifyGermanVsEnglish) rather than a hand-written detector: a
-    // dedicated JapaneseDetector/SpanishDetector per language stopped scaling once a *second*
-    // non-Japanese language needed telling apart from English.
-    final skipTranslation = {...japaneseIndices, ...spanishIndices};
-    final remainingIndices = [
-      for (var i = 0; i < originalTexts.length; i++)
-        if (!skipTranslation.contains(i)) i,
-    ];
-    final germanEnglishSplit =
-        await _translationClient.classifyGermanVsEnglish(remainingIndices, originalTexts);
-    final germanIndices = germanEnglishSplit.german;
-    final englishIndices = germanEnglishSplit.english;
-
     Future<List<String>?> fetchJapaneseReadings() {
       if (japaneseIndices.isEmpty) return Future.value(null);
       return _phoneticClient.readingsForLines([
@@ -293,99 +283,147 @@ class LyricsRepository {
       ]);
     }
 
-    Future<List<String>?> fetchJapaneseTranslations() {
-      if (japaneseIndices.isEmpty) return Future.value(null);
-      return _translationClient.translateJapaneseLines([
-        for (final i in japaneseIndices) originalTexts[i],
-      ]);
-    }
-
-    Future<List<String>?> fetchEnglishTranslations() {
-      if (englishIndices.isEmpty) return Future.value(null);
-      return _translationClient.translateEnglishLines([
-        for (final i in englishIndices) originalTexts[i],
-      ]);
-    }
-
-    Future<List<String>?> fetchSpanishTranslations() {
-      if (spanishIndices.isEmpty) return Future.value(null);
-      return _translationClient.translateSpanishLines([
-        for (final i in spanishIndices) originalTexts[i],
-      ]);
-    }
-
-    Future<List<String>?> fetchGermanTranslations() {
-      if (germanIndices.isEmpty) return Future.value(null);
-      return _translationClient.translateGermanLines([
-        for (final i in germanIndices) originalTexts[i],
-      ]);
-    }
-
-    final results = await Future.wait([
-      fetchJapaneseReadings(),
-      fetchJapaneseTranslations(),
-      fetchEnglishTranslations(),
-      fetchSpanishTranslations(),
-      fetchGermanTranslations(),
-    ]);
-    final japaneseReadings = results[0];
-    final japaneseTranslations = results[1];
-    final englishTranslations = results[2];
-    final spanishTranslations = results[3];
-    final germanTranslations = results[4];
-
     final readings = List<String?>.filled(originalTexts.length, null);
-    if (japaneseReadings != null) {
-      for (
-        var k = 0;
-        k < japaneseIndices.length && k < japaneseReadings.length;
-        k++
-      ) {
-        readings[japaneseIndices[k]] = japaneseReadings[k];
+    final translations = List<String?>.filled(originalTexts.length, null);
+
+    // If the user has supplied their own DeepL key (see SettingsPage), prefer it for the whole
+    // song in one call — better quality than ML Kit's English-pivoted on-device models, and it
+    // auto-detects each line's language itself, so none of the per-language classification/
+    // routing below is needed at all when this succeeds. Only falls through to ML Kit if no
+    // key is configured or the call itself failed (network error, revoked key, ...), never
+    // because of what language a particular line happens to be.
+    final deepLKey = await TranslationKeyStorage.getDeepLKey();
+    List<String>? deepLTranslations;
+    if (deepLKey != null) {
+      deepLTranslations = await _deepLClient.translateLines(originalTexts, deepLKey);
+    }
+
+    if (deepLTranslations != null) {
+      for (var i = 0; i < originalTexts.length; i++) {
+        translations[i] = deepLTranslations[i];
+      }
+      // Still needed even when DeepL handled translation — 독음 is a separate on-device
+      // transliteration this app generates itself, not something DeepL provides.
+      final japaneseReadings = await fetchJapaneseReadings();
+      if (japaneseReadings != null) {
+        for (
+          var k = 0;
+          k < japaneseIndices.length && k < japaneseReadings.length;
+          k++
+        ) {
+          readings[japaneseIndices[k]] = japaneseReadings[k];
+        }
+      }
+    }
+
+    if (deepLTranslations == null) {
+      // Everything left over — not Japanese, not (confidently or promoted) Spanish — is
+      // further split into German vs English by ML Kit's own language identifier (see
+      // MlKitTranslationClient.classifyGermanVsEnglish) rather than a hand-written detector: a
+      // dedicated JapaneseDetector/SpanishDetector per language stopped scaling once a
+      // *second* non-Japanese language needed telling apart from English.
+      final skipTranslation = {...japaneseIndices, ...spanishIndices};
+      final remainingIndices = [
+        for (var i = 0; i < originalTexts.length; i++)
+          if (!skipTranslation.contains(i)) i,
+      ];
+      final germanEnglishSplit =
+          await _translationClient.classifyGermanVsEnglish(remainingIndices, originalTexts);
+      final germanIndices = germanEnglishSplit.german;
+      final englishIndices = germanEnglishSplit.english;
+
+      Future<List<String>?> fetchJapaneseTranslations() {
+        if (japaneseIndices.isEmpty) return Future.value(null);
+        return _translationClient.translateJapaneseLines([
+          for (final i in japaneseIndices) originalTexts[i],
+        ]);
+      }
+
+      Future<List<String>?> fetchEnglishTranslations() {
+        if (englishIndices.isEmpty) return Future.value(null);
+        return _translationClient.translateEnglishLines([
+          for (final i in englishIndices) originalTexts[i],
+        ]);
+      }
+
+      Future<List<String>?> fetchSpanishTranslations() {
+        if (spanishIndices.isEmpty) return Future.value(null);
+        return _translationClient.translateSpanishLines([
+          for (final i in spanishIndices) originalTexts[i],
+        ]);
+      }
+
+      Future<List<String>?> fetchGermanTranslations() {
+        if (germanIndices.isEmpty) return Future.value(null);
+        return _translationClient.translateGermanLines([
+          for (final i in germanIndices) originalTexts[i],
+        ]);
+      }
+
+      final results = await Future.wait([
+        fetchJapaneseReadings(),
+        fetchJapaneseTranslations(),
+        fetchEnglishTranslations(),
+        fetchSpanishTranslations(),
+        fetchGermanTranslations(),
+      ]);
+      final japaneseReadings = results[0];
+      final japaneseTranslations = results[1];
+      final englishTranslations = results[2];
+      final spanishTranslations = results[3];
+      final germanTranslations = results[4];
+
+      if (japaneseReadings != null) {
+        for (
+          var k = 0;
+          k < japaneseIndices.length && k < japaneseReadings.length;
+          k++
+        ) {
+          readings[japaneseIndices[k]] = japaneseReadings[k];
+        }
+      }
+      if (japaneseTranslations != null) {
+        for (
+          var k = 0;
+          k < japaneseIndices.length && k < japaneseTranslations.length;
+          k++
+        ) {
+          translations[japaneseIndices[k]] = japaneseTranslations[k];
+        }
+      }
+      if (englishTranslations != null) {
+        for (
+          var k = 0;
+          k < englishIndices.length && k < englishTranslations.length;
+          k++
+        ) {
+          translations[englishIndices[k]] = englishTranslations[k];
+        }
+      }
+      if (spanishTranslations != null) {
+        for (
+          var k = 0;
+          k < spanishIndices.length && k < spanishTranslations.length;
+          k++
+        ) {
+          translations[spanishIndices[k]] = spanishTranslations[k];
+        }
+      }
+      if (germanTranslations != null) {
+        for (
+          var k = 0;
+          k < germanIndices.length && k < germanTranslations.length;
+          k++
+        ) {
+          translations[germanIndices[k]] = germanTranslations[k];
+        }
       }
     }
     // Synchronous/local, so no need to batch this through Future.wait above the way the
-    // native Japanese reading call is.
+    // native Japanese reading call is — and independent of which translation backend was
+    // used, since it's a separate on-device transliteration, not a translation.
     for (final i in spanishIndices) {
       readings[i] = SpanishHangul.transliterateLine(originalTexts[i]);
-    }
-
-    final translations = List<String?>.filled(originalTexts.length, null);
-    if (japaneseTranslations != null) {
-      for (
-        var k = 0;
-        k < japaneseIndices.length && k < japaneseTranslations.length;
-        k++
-      ) {
-        translations[japaneseIndices[k]] = japaneseTranslations[k];
-      }
-    }
-    if (englishTranslations != null) {
-      for (
-        var k = 0;
-        k < englishIndices.length && k < englishTranslations.length;
-        k++
-      ) {
-        translations[englishIndices[k]] = englishTranslations[k];
-      }
-    }
-    if (spanishTranslations != null) {
-      for (
-        var k = 0;
-        k < spanishIndices.length && k < spanishTranslations.length;
-        k++
-      ) {
-        translations[spanishIndices[k]] = spanishTranslations[k];
-      }
-    }
-    if (germanTranslations != null) {
-      for (
-        var k = 0;
-        k < germanIndices.length && k < germanTranslations.length;
-        k++
-      ) {
-        translations[germanIndices[k]] = germanTranslations[k];
-      }
     }
 
     final lines = <LyricsLine>[

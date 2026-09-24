@@ -44,6 +44,7 @@ dependencies:
   flutter_overlay_window: ^0.5.0
   google_mlkit_translation: ^0.15.1
   google_mlkit_language_id: ^0.15.1
+  flutter_secure_storage: ^11.2.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

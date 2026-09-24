@@ -8,6 +8,7 @@ import 'app/lyrics/full_screen_lyrics_page.dart';
 import 'app/lyrics/saved_lyrics_view_page.dart';
 import 'app/lyrics/saved_songs_list_page.dart';
 import 'app/onboarding/permission_screen.dart';
+import 'app/settings/translation_settings_page.dart';
 import 'app/theme/metal_theme.dart';
 import 'core/platform/notification_bridge.dart';
 import 'core/text/title_normalizer.dart';
@@ -24,6 +25,13 @@ import 'song_detection/now_playing_watcher.dart';
 // library silently fails to resolve ("Could not resolve main entrypoint
 // function") even though the function itself compiles fine.
 part 'overlay_main.dart';
+
+// Distinguishes the "full" build (Play Store default — ships the optional DeepL-key settings
+// screen) from a "lite" build produced with `--dart-define=ENABLE_CUSTOM_TRANSLATION_KEY=false`,
+// which hides that entry point entirely and leaves every install on the always-free on-device
+// ML Kit tier — see LyricsRepository._buildResult for how the two tiers are chosen at runtime.
+const bool _enableCustomTranslationKey =
+    bool.fromEnvironment('ENABLE_CUSTOM_TRANSLATION_KEY', defaultValue: true);
 
 void main() async {
   // Only the main engine ever touches Hive — see hive_bootstrap.dart.
@@ -815,6 +823,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ],
         ),
+        actions: [
+          if (_enableCustomTranslationKey)
+            IconButton(
+              icon: const Icon(Icons.translate, color: MetalTheme.steel),
+              tooltip: '번역 설정',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const TranslationSettingsPage()),
+              ),
+            ),
+        ],
       ),
       body: Container(
         decoration: const BoxDecoration(
