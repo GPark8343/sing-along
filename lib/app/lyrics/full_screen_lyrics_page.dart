@@ -657,26 +657,30 @@ class _PasteLyricsForm extends StatefulWidget {
 //  - Synced: one row per line (원문/독음/번역 kept together, stacked the same way the actual
 //    reading view shows them) — a synced song's line-for-line structure is worth protecting, so
 //    this corrects it in place rather than restructuring it.
-//  - Unsynced: a single plain-text field holding the whole song at once — still all three
-//    tiers, just not sorted into separate 원문/독음/번역 boxes. Every 3 lines of the field is
-//    one song line (원문, then 독음, then 번역, blank if a tier doesn't apply), back to back
-//    with no separator — line 1-3 is the first song line, 4-6 the second, and so on. There's no
-//    per-line timing to protect here, so free-typing (or pasting something already in this
-//    3-line grouping) is far faster than filling in three separate tiers by hand.
-// _lineGroups is the only place a real timestamp lives, and it's never rebuilt from the single
-// field's free-typed text — toggling to unsynced regenerates that field fresh from _lineGroups
-// every time (discarding whatever draft was in it before), and toggling back to synced just
-// reveals _lineGroups again untouched. A draft typed into the single field only actually takes
-// effect if 저장 is pressed while still in the unsynced layout; switching back to synced first
-// discards it. This is deliberately less "clever" than trying to re-split the free-typed text
-// back into rows and re-match each one to its original timestamp by position — a single extra
-// or missing line while typing would silently misalign everything after it and lose that
-// line's (and every later line's) sync without any visible sign it had happened.
+//  - Unsynced: three separate plain-text fields (원문/독음/번역), each one song line per text
+//    line, matched across the three by *position* (row 1 of 원문 pairs with row 1 of 독음 and
+//    row 1 of 번역, and so on) rather than by interleaving all three tiers into a single field.
+//    This used to be one field with every 3 lines read as 원문/독음/번역 back to back, which
+//    silently scrambled an ordinary copy-paste (every 3rd real lyric line read as "원문", the
+//    other two misread as that line's own 독음/번역). Three independent fields means a plain
+//    paste into just the 원문 box (leaving 독음/번역 empty) still works exactly like a straight
+//    copy-paste, while still letting all three tiers be filled in/corrected in bulk when wanted.
+//    독음/번역 are allowed to have fewer lines than 원문 (또는 아예 비어 있음) — anything past
+//    the end of a shorter field is just left null for that line.
+// _lineGroups is the only place a real timestamp lives, and it's never rebuilt from the three
+// fields' free-typed text — toggling to unsynced regenerates them fresh from _lineGroups every
+// time (discarding whatever draft was in them before), and toggling back to synced just reveals
+// _lineGroups again untouched. A draft typed into the three fields only actually takes effect if
+// 저장 is pressed while still in the unsynced layout; switching back to synced first discards it.
+// This is deliberately less "clever" than trying to re-split the free-typed text back into rows
+// and re-match each one to its original timestamp by position — a single extra or missing line
+// while typing would silently misalign everything after it and lose that line's (and every
+// later line's) sync without any visible sign it had happened.
 class _PasteLyricsFormState extends State<_PasteLyricsForm> {
-  static const int _tiersPerLine = 3;
-
   late List<_LineControllers> _lineGroups;
-  late final TextEditingController _bulkAll;
+  late final TextEditingController _bulkOriginal;
+  late final TextEditingController _bulkPhonetic;
+  late final TextEditingController _bulkTranslation;
   late bool _synced;
 
   @override
@@ -694,28 +698,40 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
                 timestampMs: line.timestampMs,
               ),
           ];
-    _bulkAll = TextEditingController(text: _bulkTextFrom(_lineGroups));
+    _bulkOriginal = TextEditingController(
+      text: _bulkTextFrom(_lineGroups, (g) => g.original.text),
+    );
+    _bulkPhonetic = TextEditingController(
+      text: _bulkTextFrom(_lineGroups, (g) => g.phonetic.text),
+    );
+    _bulkTranslation = TextEditingController(
+      text: _bulkTextFrom(_lineGroups, (g) => g.translation.text),
+    );
   }
 
-  String _bulkTextFrom(List<_LineControllers> groups) => [
-    for (final group in groups) ...[
-      group.original.text,
-      group.phonetic.text,
-      group.translation.text,
-    ],
-  ].join('\n');
+  String _bulkTextFrom(
+    List<_LineControllers> groups,
+    String Function(_LineControllers) pick,
+  ) => [for (final group in groups) pick(group)].join('\n');
 
   @override
   void didUpdateWidget(covariant _PasteLyricsForm oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.isSynced == _synced) return;
-    // Synced -> unsynced: refresh the single field from the current (untouched) rows, so it
-    // starts from what's actually showing rather than a stale draft from earlier.
+    // Synced -> unsynced: refresh the three fields from the current (untouched) rows, so they
+    // start from what's actually showing rather than a stale draft from earlier.
     // Unsynced -> synced: nothing to do here — _lineGroups was never touched, so the rows
-    // that reappear are already exactly what they were before the single field ever showed.
+    // that reappear are already exactly what they were before the three fields ever showed.
     final wasSynced = _synced;
     setState(() {
-      if (wasSynced) _bulkAll.text = _bulkTextFrom(_lineGroups);
+      if (wasSynced) {
+        _bulkOriginal.text = _bulkTextFrom(_lineGroups, (g) => g.original.text);
+        _bulkPhonetic.text = _bulkTextFrom(_lineGroups, (g) => g.phonetic.text);
+        _bulkTranslation.text = _bulkTextFrom(
+          _lineGroups,
+          (g) => g.translation.text,
+        );
+      }
       _synced = widget.isSynced;
     });
   }
@@ -725,7 +741,9 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
     for (final group in _lineGroups) {
       group.dispose();
     }
-    _bulkAll.dispose();
+    _bulkOriginal.dispose();
+    _bulkPhonetic.dispose();
+    _bulkTranslation.dispose();
     super.dispose();
   }
 
@@ -735,7 +753,9 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
         group.dispose();
       }
       _lineGroups = [_LineControllers()];
-      _bulkAll.clear();
+      _bulkOriginal.clear();
+      _bulkPhonetic.clear();
+      _bulkTranslation.clear();
     });
   }
 
@@ -767,14 +787,18 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
           () => group.timestampMs,
         );
       }
-      final rawLines = _bulkAll.text.split('\n');
+      final originalLines = _bulkOriginal.text.split('\n');
+      final phoneticLines = _bulkPhonetic.text.split('\n');
+      final translationLines = _bulkTranslation.text.split('\n');
       lines = [
-        for (var i = 0; i < rawLines.length; i += _tiersPerLine)
+        for (var i = 0; i < originalLines.length; i++)
           LyricsLine(
-            timestampMs: originalTimestampByText[rawLines[i]],
-            original: rawLines[i],
-            phonetic: i + 1 < rawLines.length ? rawLines[i + 1] : null,
-            translation: i + 2 < rawLines.length ? rawLines[i + 2] : null,
+            timestampMs: originalTimestampByText[originalLines[i]],
+            original: originalLines[i],
+            phonetic: i < phoneticLines.length ? phoneticLines[i] : null,
+            translation: i < translationLines.length
+                ? translationLines[i]
+                : null,
           ),
       ];
     }
@@ -801,7 +825,7 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
                 Text(
                   _synced
                       ? '한 줄씩 원문·독음·번역을 고치세요 — 독음/번역은 비워둬도 되고, 싱크 정보 없이 저장됩니다'
-                      : '원문·독음·번역을 3줄씩 반복해서 입력하세요 (원문/독음/번역/원문/독음/번역...) — 독음·번역 줄은 비워둬도 되고, 싱크 정보 없이 저장됩니다',
+                      : '원문을 그대로 붙여넣으세요 (한 줄에 한 소절) — 독음·번역은 같은 줄 번호끼리 짝지어지며, 비워둬도 됩니다. 싱크 정보 없이 저장됩니다',
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white38, fontSize: 13),
                 ),
@@ -826,13 +850,28 @@ class _PasteLyricsFormState extends State<_PasteLyricsForm> {
                 const SizedBox(height: 8),
                 if (_synced)
                   for (var i = 0; i < _lineGroups.length; i++) _buildLineRow(i)
-                else
+                else ...[
                   _buildField(
-                    controller: _bulkAll,
-                    hint: '가사를 여기에 붙여넣으세요',
+                    controller: _bulkOriginal,
+                    hint: '원문을 여기에 붙여넣으세요 (필수)',
                     boxed: true,
-                    minLines: 10,
+                    minLines: 3,
                   ),
+                  const SizedBox(height: 12),
+                  _buildField(
+                    controller: _bulkPhonetic,
+                    hint: '독음 (선택, 원문과 같은 줄 순서로)',
+                    boxed: true,
+                    minLines: 3,
+                  ),
+                  const SizedBox(height: 12),
+                  _buildField(
+                    controller: _bulkTranslation,
+                    hint: '번역 (선택, 원문과 같은 줄 순서로)',
+                    boxed: true,
+                    minLines: 3,
+                  ),
+                ],
               ],
             ),
           ),

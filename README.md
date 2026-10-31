@@ -1,17 +1,18 @@
-# sing_along
+# sing-along
 
-A new Flutter project.
+다른 앱(유튜브 뮤직, 스포티파이 등)에서 재생 중인 곡을 자동으로 감지해서, 원문 가사·한국어 독음(일본어)·한국어 번역을 3단으로 보여주는 플로팅 오버레이 가사 앱입니다.
 
-## Getting Started
+## 주요 기능
 
-This project is a starting point for a Flutter application.
+- 알림 리스너로 백그라운드에서 재생 중인 곡을 자동 감지
+- [LRCLIB](https://lrclib.net/)에서 가사를 가져와 로컬에 캐싱
+- 일본어 가사는 독음(한글 발음 표기)을 자동 생성
+- 온디바이스 ML Kit으로 가사 번역 (일본어·영어·스페인어·독일어 → 한국어), 추가 설치/네트워크 비용 없음
+- 다른 앱 위에 띄우는 플로팅 오버레이로 재생 중 바로 가사 확인, 접어서 얇은 바로 줄이기 가능
+- 가사를 찾지 못한 곡은 직접 붙여넣어 저장 가능
 
-A few resources to get you started if this is your first Flutter project:
+## 번역 품질 더 좋게 하기 (선택)
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+기본값은 기기에서 완전히 무료로 동작하는 ML Kit 번역이라 별도 설정 없이도 바로 쓸 수 있지만, 영어가 아닌 언어(특히 일본어)는 번역 과정에서 영어를 한 번 거치기 때문에 뜻이 다소 어색하게 나올 때가 있습니다.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+앱 상단의 번역 아이콘에서 본인의 **DeepL API 키**를 직접 입력하면, 그 이후부터는 훨씬 자연스러운 DeepL 번역을 대신 사용합니다. [DeepL 무료 요금제](https://www.deepl.com/pro-api)로도 월 50만 자까지는 무료로 키를 발급받아 쓸 수 있습니다. 키는 이 기기의 보안 저장소에만 저장되며, 입력하지 않아도 앱은 평소처럼 정상 동작합니다.
